@@ -30,6 +30,42 @@ jobs:
           api_key: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+## Manual Run
+
+Trigger the review manually from the **Actions** tab and specify the PR number yourself:
+
+```yaml
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+
+permissions:
+  pull-requests: write
+  contents: read
+  models: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: n-devs/ai-code-review@v2
+        with:
+          gh_pat: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
+          api_key: ${{ secrets.GITHUB_TOKEN }}
+```
+
+With this setup the workflow runs automatically on PR activity, and you can also go to **Actions → AI Code Review → Run workflow** and enter a PR number to review any PR on demand.
+
 ## Inputs
 
 | Input | Required | Default | Description |

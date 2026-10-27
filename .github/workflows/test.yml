@@ -3,6 +3,12 @@ name: Test AI Code Review Action
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
 
 permissions:
   pull-requests: write
@@ -24,7 +30,7 @@ jobs:
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
-          pr_number: ${{ github.event.pull_request.number }}
+          pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
           api_key: ${{ secrets.GITHUB_TOKEN }}
           language: Thai
           max_tokens: 2048
