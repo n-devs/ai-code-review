@@ -25,6 +25,22 @@ const LANGUAGE = process.env.INPUT_LANGUAGE ?? process.env.LANGUAGE ?? "English"
 const TITLE = process.env.INPUT_TITLE ?? process.env.TITLE ?? "AI Code Review";
 const FILES_CHANGED = (process.env.INPUT_FILES_CHANGED ?? process.env.FILES_CHANGED ?? "false").toLowerCase() === "true";
 const MAX_INLINE_COMMENTS = 20;
+// agent รันพร้อมกัน (concurrent) — จำกัดจำนวน AI call พร้อมกันกันโดน rate limit
+const MAX_CONCURRENT_AI_CALLS = 5;
+
+// รัน task หลายตัวพร้อมกันแบบจำกัด concurrency — ผลลัพธ์คงลำดับเดิมตาม array
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const idx = next++;
+      results[idx] = await tasks[idx]();
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 // "all" = review การเปลี่ยนแปลงของทุกคน, ไม่ระบุ = ใช้ user ที่ run workflow (GITHUB_ACTOR)
 const USERNAME = ((process.env.INPUT_USERNAME ?? "").trim() || process.env.GITHUB_ACTOR || "all").toLowerCase();
 // โหมด thinking/reasoning ของโมเดล (ใช้ได้เฉพาะโมเดล/ผู้ให้บริการที่รองรับ)
@@ -723,26 +739,30 @@ async function reviewFilesInline(
   skillSuffix = "",
   fileAuthors: Map<string, Set<string>> = new Map()
 ): Promise<void> {
-  const inline: FileInlineComment[] = [];
-
-  // 📋 Checklist ไม่ทำ inline — สรุปเป็นตารางลง review summary (tab Conversation) แทน
+  // 📋 Checklist ไม่ทำ inline — สรุปตารางลง review summary (Conversation) และเริ่มรันขนานไปเลย
   let checklistSection = "";
-  if (AGENTS.includes("checklist")) {
-    const profile = AGENT_REGISTRY.get("checklist");
-    const diff = buildDiffText(files);
-    if (profile && diff) {
-      console.log(`${profile.label} summarizing to conversation...`);
-      const userPrompt =
-        `Run your code review checklist against the diff below. Present the result as a markdown table ` +
-        `with columns | # | Item | Status | Note | — one row per checklist item ` +
-        `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}` +
-        addresseePrompt(files, fileAuthors);
-      const result = await askAI(profile.persona + skillSuffix, userPrompt);
-      checklistSection =
-        `### ${profile.label}\n\n${ownerGreeting(files, fileAuthors)}` +
-        (closeUnbalancedFence(result.trim()) || "No findings.");
-    }
-  }
+  const checklistPromise =
+    AGENTS.includes("checklist") && AGENT_REGISTRY.get("checklist")
+      ? (async () => {
+          const profile = AGENT_REGISTRY.get("checklist")!;
+          const diff = buildDiffText(files);
+          if (!diff) return;
+          console.log(`${profile.label} summarizing to conversation...`);
+          try {
+            const userPrompt =
+              `Run your code review checklist against the diff below. Present the result as a markdown table ` +
+              `with columns | # | Item | Status | Note | — one row per checklist item ` +
+              `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}` +
+              addresseePrompt(files, fileAuthors);
+            const result = await askAI(profile.persona + skillSuffix, userPrompt);
+            checklistSection =
+              `### ${profile.label}\n\n${ownerGreeting(files, fileAuthors)}` +
+              (closeUnbalancedFence(result.trim()) || "No findings.");
+          } catch (err) {
+            console.error(`${profile.label} failed: ${(err as Error).message}`);
+          }
+        })()
+      : null;
 
   // agent ที่จะรันแบบ inline: ตาม input (built-in + custom) ยกเว้น checklist หรือโปรไฟล์เดี่ยวเมื่อไม่ได้ระบุ
   const inlineAgentNames = AGENTS.filter((a) => a !== "checklist");
@@ -766,6 +786,20 @@ async function reviewFilesInline(
     });
   }
 
+  // สร้าง job = (ไฟล์ × agent) แล้วรันพร้อมกันแบบจำกัด concurrency
+  // เก็บลำดับ (ลำดับไฟล์, ลำดับ agent, เลขบรรทัด) ไว้จัดเรียงผลให้ deterministic หลังรันเสร็จ
+  const fileIndex = new Map<GitHubFile, number>();
+  files.forEach((f, i) => fileIndex.set(f, i));
+
+  interface Collected {
+    fi: number;
+    ri: number;
+    line: number;
+    comment: FileInlineComment;
+  }
+  const collected: Collected[] = [];
+
+  const jobs: Array<() => Promise<void>> = [];
   for (const file of files) {
     let patch = file.patch ?? "";
     if (patch.length > MAX_DIFF_CHARS) {
@@ -773,6 +807,7 @@ async function reviewFilesInline(
     }
     const owners = fileOwners(file.filename, fileAuthors);
     const ownerLink = owners.length ? ownerLinks(file.filename, fileAuthors) : "";
+    const valid = commentableLines(patch);
 
     const userPrompt =
       `Review the diff below and list problems or improvements worth flagging.\n` +
@@ -784,34 +819,55 @@ async function reviewFilesInline(
           `write your comment as if speaking to them by name (plain username, no @).`
         : "");
 
-    for (const reviewer of reviewers) {
-      console.log(`Reviewing ${file.filename} (${patch.length} chars)${reviewer.label ? ` — ${reviewer.label}` : ""}...`);
-      const result = await askAI(reviewer.system, userPrompt);
-      const valid = commentableLines(patch);
+    reviewers.forEach((reviewer, ri) => {
+      jobs.push(async () => {
+        console.log(
+          `Reviewing ${file.filename} (${patch.length} chars)${reviewer.label ? ` — ${reviewer.label}` : ""}...`
+        );
+        let result: string;
+        try {
+          result = await askAI(reviewer.system, userPrompt);
+        } catch (err) {
+          console.error(`  ${reviewer.label || "reviewer"} failed on ${file.filename}: ${(err as Error).message}`);
+          return;
+        }
+        const items = parseInlineComments(result);
+        if (!items.length) {
+          console.log(`  ${reviewer.label || "reviewer"}: no inline comments parsed for ${file.filename}`);
+          return;
+        }
+        for (const item of items) {
+          const line = snapToNearestLine(item.line, valid);
+          if (line === null) continue;
+          collected.push({
+            fi: fileIndex.get(file) ?? 0,
+            ri,
+            line,
+            comment: {
+              path: file.filename,
+              line,
+              // ทุก comment ขึ้นต้นด้วยชื่อเจ้าของไฟล์เป็น link ไป profile (แสดงเป็น @username แต่ไม่ใช่ mention จริง)
+              body: closeUnbalancedFence(
+                `${reviewer.label ? `**${reviewer.label}:** ` : ""}${ownerLink ? `${ownerLink} — ` : ""}${item.comment}`
+              ),
+            },
+          });
+        }
+      });
+    });
+  }
 
-      const before = inline.length;
-      for (const item of parseInlineComments(result)) {
-        const line = snapToNearestLine(item.line, valid);
-        if (line === null) continue;
-        // ทุก comment ขึ้นต้นด้วยชื่อเจ้าของไฟล์เป็น link ไป profile (แสดงเป็น @username แต่ไม่ใช่ mention จริง)
-        inline.push({
-          path: file.filename,
-          line,
-          body: closeUnbalancedFence(
-            `${reviewer.label ? `**${reviewer.label}:** ` : ""}${ownerLink ? `${ownerLink} — ` : ""}${item.comment}`
-          ),
-        });
-        if (inline.length >= MAX_INLINE_COMMENTS) break;
-      }
-      if (inline.length === before) {
-        console.log(`  ${reviewer.label || "reviewer"}: no inline comments parsed for ${file.filename}`);
-      }
-      if (inline.length >= MAX_INLINE_COMMENTS) break;
-    }
-    if (inline.length >= MAX_INLINE_COMMENTS) {
-      console.log(`Reached inline comment cap (${MAX_INLINE_COMMENTS}); skipping remaining files.`);
-      break;
-    }
+  console.log(`Running ${jobs.length} inline review job(s) in parallel (concurrency ${MAX_CONCURRENT_AI_CALLS})...`);
+  await runWithConcurrency(jobs, MAX_CONCURRENT_AI_CALLS);
+  if (checklistPromise) await checklistPromise;
+
+  // จัดลำดับให้เหมือนการรันแบบลำดับ (ไฟล์ → agent → บรรทัด) แล้วค่อยตัดตามโควตา
+  collected.sort((a, b) => a.fi - b.fi || a.ri - b.ri || a.line - b.line);
+  const inline = collected.slice(0, MAX_INLINE_COMMENTS).map((c) => c.comment);
+  if (collected.length > MAX_INLINE_COMMENTS) {
+    console.log(
+      `Collected ${collected.length} inline comments — capped to ${MAX_INLINE_COMMENTS} (ordered by file/agent/line).`
+    );
   }
 
   if (!inline.length) {
@@ -1324,35 +1380,47 @@ async function main(): Promise<void> {
   const ownerGreet = ownerGreeting(files, fileAuthors);
 
   if (AGENTS.length) {
-    console.log(`Diff size: ${diff.length} chars. Multi-agent review: ${AGENTS.join(", ")}...`);
+    console.log(`Diff size: ${diff.length} chars. Multi-agent review (parallel): ${AGENTS.join(", ")}...`);
+
+    // รันทุก agent พร้อมกัน — Promise.all คงลำดับ section ตามลำดับใน AGENTS
+    const agentResults = await Promise.all(
+      AGENTS.map(async (agent) => {
+        const profile = AGENT_REGISTRY.get(agent);
+        if (!profile) return null;
+        console.log(`${profile.label} reviewing...`);
+        try {
+          let agentUserPrompt = `Please review the following code diff and suggest improvements. Respond in ${LANGUAGE}.\n\n${diff}`;
+          if (agent === "author") {
+            agentUserPrompt = `This is your own code. Explain how it works (what each part does and why), self-review it, and point out any leftover debug code. Respond in ${LANGUAGE}.\n\n${diff}`;
+            const stats = computeDiffStats(files);
+            agentUserPrompt +=
+              `\n\nContext: PR size +${stats.added} / -${stats.removed} across ${files.length} files. ` +
+              `Guideline: keep PRs within 200–400 changed lines — if this exceeds the guideline, suggest how to split it.`;
+          }
+          if (agent === "checklist") {
+            // สั่ง format ตรงนี้แทนใน persona — เพราะโหมด inline ต้องการ JSON (สั่งซ้อนใน persona จะชนกันแล้ว parser อ่านไม่ออก)
+            agentUserPrompt =
+              `Run your code review checklist against the diff below. Present the result as a markdown table ` +
+              `with columns | # | Item | Status | Note | — one row per checklist item ` +
+              `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}`;
+          }
+          agentUserPrompt += addressee;
+          const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
+          return { agent, profile, text: closeUnbalancedFence(result.trim()) };
+        } catch (err) {
+          console.error(`${profile.label} failed: ${(err as Error).message}`);
+          return { agent, profile, text: `⚠️ ${profile.label} could not complete: ${(err as Error).message}` };
+        }
+      })
+    );
+
     const sections: string[] = [];
-
-    for (const agent of AGENTS) {
-      const profile = AGENT_REGISTRY.get(agent);
-      if (!profile) continue;
-      console.log(`${profile.label} reviewing...`);
-      let agentUserPrompt = `Please review the following code diff and suggest improvements. Respond in ${LANGUAGE}.\n\n${diff}`;
-      if (agent === "author") {
-        agentUserPrompt = `This is your own code. Explain how it works (what each part does and why), self-review it, and point out any leftover debug code. Respond in ${LANGUAGE}.\n\n${diff}`;
-        const stats = computeDiffStats(files);
-        agentUserPrompt +=
-          `\n\nContext: PR size +${stats.added} / -${stats.removed} across ${files.length} files. ` +
-          `Guideline: keep PRs within 200–400 changed lines — if this exceeds the guideline, suggest how to split it.`;
-      }
-      if (agent === "checklist") {
-        // สั่ง format ตรงนี้แทนใน persona — เพราะโหมด inline ต้องการ JSON (สั่งซ้อนใน persona จะชนกันแล้ว parser อ่านไม่ออก)
-        agentUserPrompt =
-          `Run your code review checklist against the diff below. Present the result as a markdown table ` +
-          `with columns | # | Item | Status | Note | — one row per checklist item ` +
-          `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}`;
-      }
-      agentUserPrompt += addressee;
-      const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
-
-      let section = `### ${profile.label}\n\n`;
-      if (agent === "author") section += `${prSizeLine(files)}\n\n`;
+    for (const r of agentResults) {
+      if (!r) continue;
+      let section = `### ${r.profile.label}\n\n`;
+      if (r.agent === "author") section += `${prSizeLine(files)}\n\n`;
       section += ownerGreet;
-      sections.push(section + (closeUnbalancedFence(result.trim()) || "No findings."));
+      sections.push(section + (r.text || "No findings."));
     }
 
     console.log("Posting comment to GitHub...");
