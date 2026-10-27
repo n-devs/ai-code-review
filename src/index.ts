@@ -68,8 +68,7 @@ const AGENT_PROFILES: Record<ReviewAgent, { label: string; persona: string }> = 
     label: "📋 Code Review Checklist",
     persona:
       "You are a systematic Checklist Reviewer. Go through the standard code review checklist below, one item at a time, " +
-      "and give each item a status — ✅ pass, ⚠️ needs attention, ❌ fail, or ➖ not applicable — with a short note. " +
-      "Present the result as a markdown table with columns: | # | Item | Status | Note |.\n" +
+      "and give each item a status — ✅ pass, ⚠️ needs attention, ❌ fail, or ➖ not applicable — with a short note.\n" +
       "Checklist:\n" +
       "1. Correctness — logic matches the intent of the change\n" +
       "2. Naming and readability\n" +
@@ -666,12 +665,89 @@ function parseInlineComments(raw: string): Array<{ line: number; comment: string
   return items;
 }
 
-async function reviewFilesInline(files: GitHubFile[], scopeLine = "", skillSuffix = ""): Promise<void> {
+// เจ้าของไฟล์: ระบุ user → user นั้น, all → เจ้าของตาม commit authorship
+function fileOwners(filename: string, fileAuthors: Map<string, Set<string>>): string[] {
+  if (USERNAME !== "all") return [USERNAME];
+  return [...(fileAuthors.get(filename) ?? [])];
+}
+
+// link ไปหน้า profile GitHub — แสดงเป็น @username แต่ไม่ใช่ mention จริง
+// (ไม่ส่ง notification ซ้ำทุก comment = ไม่ noise)
+function ownerLinks(filename: string, fileAuthors: Map<string, Set<string>>): string {
+  return fileOwners(filename, fileAuthors)
+    .map((o) => `[@${o}](https://github.com/${o})`)
+    .join(" ");
+}
+
+// link ชื่อเจ้าของงานขึ้นหน้า section ของทุก agent — แสดงเป็น @username คลิกได้ แต่ไม่ใช่ mention จริง
+function ownerGreeting(files: GitHubFile[], fileAuthors: Map<string, Set<string>>): string {
+  const owners: string[] = [];
+  if (USERNAME !== "all") {
+    owners.push(USERNAME);
+  } else {
+    for (const f of files) {
+      for (const owner of fileAuthors.get(f.filename) ?? []) {
+        if (!owners.includes(owner)) owners.push(owner);
+      }
+    }
+  }
+  return owners.length
+    ? `${owners.map((o) => `[@${o}](https://github.com/${o})`).join(" ")} — `
+    : "";
+}
+
+// คำสั่งให้ AI คุยกับเจ้าของโค้ดโดยตรง (แทนการพูดลอย ๆ)
+// โหมดระบุ user → คุยกับ user เดี่ยว, โหมด all → แนบ mapping ไฟล์ → เจ้าของให้อ้างถูกคน
+// (ใช้ชื่อล้วนไม่มี @ เพื่อไม่ให้เกิด mention จริงซ้ำในทุก section — link จริงอยู่ที่ prefix ของเรา)
+function addresseePrompt(files: GitHubFile[], fileAuthors: Map<string, Set<string>>): string {
+  if (USERNAME !== "all") {
+    return `\n\nAddress the code owner ${USERNAME} directly in your response — talk to them by name (plain username, no @), not about them.`;
+  }
+  const lines = files
+    .map((f) => {
+      const owners = [...(fileAuthors.get(f.filename) ?? [])];
+      return owners.length ? `${f.filename} → ${owners.join(", ")}` : null;
+    })
+    .filter((l): l is string => !!l)
+    .slice(0, 30);
+  if (!lines.length) return "";
+  return (
+    `\n\nFile owners — address the owner directly when commenting on their file ` +
+    `(talk to them by name, plain username, no @):\n${lines.join("\n")}`
+  );
+}
+
+async function reviewFilesInline(
+  files: GitHubFile[],
+  scopeLine = "",
+  skillSuffix = "",
+  fileAuthors: Map<string, Set<string>> = new Map()
+): Promise<void> {
   const inline: FileInlineComment[] = [];
 
-  // agent ที่จะรัน: ตาม input (built-in + custom) หรือโปรไฟล์เดี่ยวแบบเดิมเมื่อไม่ได้ระบุ
+  // 📋 Checklist ไม่ทำ inline — สรุปเป็นตารางลง review summary (tab Conversation) แทน
+  let checklistSection = "";
+  if (AGENTS.includes("checklist")) {
+    const profile = AGENT_REGISTRY.get("checklist");
+    const diff = buildDiffText(files);
+    if (profile && diff) {
+      console.log(`${profile.label} summarizing to conversation...`);
+      const userPrompt =
+        `Run your code review checklist against the diff below. Present the result as a markdown table ` +
+        `with columns | # | Item | Status | Note | — one row per checklist item ` +
+        `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}` +
+        addresseePrompt(files, fileAuthors);
+      const result = await askAI(profile.persona + skillSuffix, userPrompt);
+      checklistSection =
+        `### ${profile.label}\n\n${ownerGreeting(files, fileAuthors)}` +
+        (closeUnbalancedFence(result.trim()) || "No findings.");
+    }
+  }
+
+  // agent ที่จะรันแบบ inline: ตาม input (built-in + custom) ยกเว้น checklist หรือโปรไฟล์เดี่ยวเมื่อไม่ได้ระบุ
+  const inlineAgentNames = AGENTS.filter((a) => a !== "checklist");
   const reviewers: Array<{ label: string; system: string }> = [];
-  for (const name of AGENTS) {
+  for (const name of inlineAgentNames) {
     const p = AGENT_REGISTRY.get(name);
     if (!p) continue;
     reviewers.push({
@@ -695,27 +771,40 @@ async function reviewFilesInline(files: GitHubFile[], scopeLine = "", skillSuffi
     if (patch.length > MAX_DIFF_CHARS) {
       patch = patch.slice(0, MAX_DIFF_CHARS) + "\n... (patch truncated)";
     }
+    const owners = fileOwners(file.filename, fileAuthors);
+    const ownerLink = owners.length ? ownerLinks(file.filename, fileAuthors) : "";
 
     const userPrompt =
       `Review the diff below and list problems or improvements worth flagging.\n` +
       `Return a JSON array; each item must be {"line": <line number in the NEW version of the file>, "comment": "<concise review comment>"}.\n` +
       `Anchor each comment to the most relevant changed line. If nothing needs a comment, return [].\n\n` +
-      `File: ${file.filename}\n${patch}`;
+      `File: ${file.filename}\n${patch}` +
+      (owners.length
+        ? `\n\nYou are talking directly to ${owners.join(", ")}, the owner(s) of this file — ` +
+          `write your comment as if speaking to them by name (plain username, no @).`
+        : "");
 
     for (const reviewer of reviewers) {
       console.log(`Reviewing ${file.filename} (${patch.length} chars)${reviewer.label ? ` — ${reviewer.label}` : ""}...`);
       const result = await askAI(reviewer.system, userPrompt);
       const valid = commentableLines(patch);
 
+      const before = inline.length;
       for (const item of parseInlineComments(result)) {
         const line = snapToNearestLine(item.line, valid);
         if (line === null) continue;
+        // ทุก comment ขึ้นต้นด้วยชื่อเจ้าของไฟล์เป็น link ไป profile (แสดงเป็น @username แต่ไม่ใช่ mention จริง)
         inline.push({
           path: file.filename,
           line,
-          body: reviewer.label ? `**${reviewer.label}:** ${item.comment}` : item.comment,
+          body: closeUnbalancedFence(
+            `${reviewer.label ? `**${reviewer.label}:** ` : ""}${ownerLink ? `${ownerLink} — ` : ""}${item.comment}`
+          ),
         });
         if (inline.length >= MAX_INLINE_COMMENTS) break;
+      }
+      if (inline.length === before) {
+        console.log(`  ${reviewer.label || "reviewer"}: no inline comments parsed for ${file.filename}`);
       }
       if (inline.length >= MAX_INLINE_COMMENTS) break;
     }
@@ -726,19 +815,29 @@ async function reviewFilesInline(files: GitHubFile[], scopeLine = "", skillSuffi
   }
 
   if (!inline.length) {
-    console.log("AI left no inline comments.");
+    if (checklistSection) {
+      // ไม่มี inline comment แต่ checklist มีผล — โพสต์เป็น comment ลง Conversation เลย
+      console.log("No inline comments — posting checklist summary as a PR comment...");
+      await postCommentToPr(checklistSection, scopeLine);
+    } else {
+      console.log("AI left no inline comments.");
+    }
     return;
   }
 
-  await postInlineReview(inline, scopeLine);
+  await postInlineReview(inline, scopeLine, checklistSection);
 }
 
 // สร้าง PR review พร้อม inline comments ผูกกับบรรทัดใน tab Files changed
-async function postInlineReview(comments: FileInlineComment[], scopeLine = ""): Promise<void> {
+// (checklistSection = สรุปตาราง checklist ที่จะแนบลง review body ใน tab Conversation)
+async function postInlineReview(comments: FileInlineComment[], scopeLine = "", checklistSection = ""): Promise<void> {
   const url = `https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/reviews`;
   const provider = PROVIDER ?? "copilot";
   const payload = JSON.stringify({
-    body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`\n\n${scopeLine}Reviewed changed files: ${comments.length} inline comment(s).`,
+    body:
+      `## ${TITLE} — \`${MODEL}\` via \`${provider}\`\n\n${scopeLine}` +
+      `Reviewed changed files: ${comments.length} inline comment(s).` +
+      (checklistSection ? `\n\n${checklistSection}` : ""),
     event: "COMMENT",
     comments: comments.map((c) => ({ path: c.path, line: c.line, body: c.body })),
   });
@@ -764,11 +863,27 @@ async function postInlineReview(comments: FileInlineComment[], scopeLine = ""): 
   console.error(`Failed to post inline review: ${status} ${text.slice(0, 300)}`);
   console.log("Falling back to a single PR comment...");
   const fallback = comments.map((c) => `**\`${c.path}:${c.line}\`**\n\n${c.body}`).join("\n\n");
-  await postCommentToPr(fallback, scopeLine);
+  await postCommentToPr(`${checklistSection ? `${checklistSection}\n\n` : ""}${fallback}`, scopeLine);
+}
+
+// ปิด code fence ที่ไม่สมดุลในคำตอบของ AI — fence ที่เปิดโดยไม่ปิดจะกลืน markdown
+// ของ section ถัดไป (ทำให้ heading ของ agent ตัวถัดไปหายไป)
+// ตรวจทีละบรรทัดแบบ track เปิด/ปิด รองรับทั้ง ``` ~~~ และ fence ยาว 4+ backticks
+function closeUnbalancedFence(text: string): string {
+  const fenceRe = /^ {0,3}(`{3,}|~{3,})/gm;
+  let openFence: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text))) {
+    if (!openFence) {
+      openFence = m[1];
+    } else if (m[1].charAt(0) === openFence.charAt(0) && m[1].length >= openFence.length) {
+      openFence = null;
+    }
+  }
+  return openFence ? `${text}\n${openFence}` : text;
 }
 
 // --- Web search tool (ใช้เมื่อ web_search=true) ---
-
 const WEB_SEARCH_TOOL = {
   type: "function",
   function: {
@@ -1192,7 +1307,7 @@ async function main(): Promise<void> {
       return;
     }
     console.log(`files_changed mode: reviewing ${reviewable.length} changed file(s) inline...`);
-    await reviewFilesInline(reviewable, buildScopeLine(reviewable, fileAuthors), skillSuffix);
+    await reviewFilesInline(reviewable, buildScopeLine(reviewable, fileAuthors), skillSuffix, fileAuthors);
     console.log("Done!");
     return;
   }
@@ -1205,6 +1320,8 @@ async function main(): Promise<void> {
   }
 
   const scopeLine = buildScopeLine(files.filter((f) => f.patch), fileAuthors);
+  const addressee = addresseePrompt(files, fileAuthors);
+  const ownerGreet = ownerGreeting(files, fileAuthors);
 
   if (AGENTS.length) {
     console.log(`Diff size: ${diff.length} chars. Multi-agent review: ${AGENTS.join(", ")}...`);
@@ -1222,11 +1339,20 @@ async function main(): Promise<void> {
           `\n\nContext: PR size +${stats.added} / -${stats.removed} across ${files.length} files. ` +
           `Guideline: keep PRs within 200–400 changed lines — if this exceeds the guideline, suggest how to split it.`;
       }
+      if (agent === "checklist") {
+        // สั่ง format ตรงนี้แทนใน persona — เพราะโหมด inline ต้องการ JSON (สั่งซ้อนใน persona จะชนกันแล้ว parser อ่านไม่ออก)
+        agentUserPrompt =
+          `Run your code review checklist against the diff below. Present the result as a markdown table ` +
+          `with columns | # | Item | Status | Note | — one row per checklist item ` +
+          `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}`;
+      }
+      agentUserPrompt += addressee;
       const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
 
       let section = `### ${profile.label}\n\n`;
       if (agent === "author") section += `${prSizeLine(files)}\n\n`;
-      sections.push(section + (result.trim() || "No findings."));
+      section += ownerGreet;
+      sections.push(section + (closeUnbalancedFence(result.trim()) || "No findings."));
     }
 
     console.log("Posting comment to GitHub...");
@@ -1237,11 +1363,11 @@ async function main(): Promise<void> {
 
   console.log(`Diff size: ${diff.length} chars. Sending to AI...`);
   const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
-  const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}`;
+  const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}${addressee}`;
   const reviewResult = await askAI(systemPrompt + skillSuffix, userPrompt);
 
   console.log("Posting comment to GitHub...");
-  await postCommentToPr(reviewResult, scopeLine);
+  await postCommentToPr(ownerGreet + closeUnbalancedFence(reviewResult), scopeLine);
   console.log("Done!");
 }
 

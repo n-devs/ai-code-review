@@ -184,7 +184,7 @@ Set `agents: all` (or a comma-separated subset) to run the review as four AI age
 | `author` | 🧑‍💻 Author (Self-Review) | Self-reviews their own code: explains how the code works (what each part does and why) and flags leftover debug code — plus a deterministic **PR size check** against the 200–400 changed-lines guideline |
 | `primary` | 🔍 Primary Reviewer | Business logic and correctness, edge cases, error handling, readability, and whether unit/integration tests cover the real behavior |
 | `specialist` | 🛡️ Specialist Reviewer | System architecture, scalability, overall impact, security vulnerabilities (injection, auth, secrets), and database performance in critical paths — holds final approval for core/production systems |
-| `checklist` | 📋 Code Review Checklist | Walks through a standard 12-item review checklist (correctness, readability, error handling, edge cases, security, performance, tests, docs, debug leftovers, compatibility, dependencies, logging) and reports ✅/⚠️/❌ per item as a table |
+| `checklist` | 📋 Code Review Checklist | Walks through a standard 12-item review checklist (correctness, readability, error handling, edge cases, security, performance, tests, docs, debug leftovers, compatibility, dependencies, logging) and reports ✅/⚠️/❌ per item as a table. In `files_changed` mode it summarizes as a table in the Conversation tab instead of inline comments |
 
 ```yaml
 - uses: n-devs/ai-code-review@v2
@@ -261,7 +261,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 | `max_diff_chars` | | `10000` | Maximum characters of diff sent to AI |
 | `language` | | `English` | Language for the review response |
 | `files_changed` | | `false` | `true` = AI reviews each changed file and posts inline review comments on the diff (Files changed tab) instead of one combined PR comment |
-| `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user, who is @mentioned in the comment. `all` = everyone, with each author @mentioned next to their files |
+| `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user. Agents talk to the owner directly: every inline comment starts with the owner's username as a clickable profile link (no mention noise), and the review summary carries the real @mention |
 | `mode` | | `normal` | `thinking` = enable thinking/reasoning mode where supported (`enable_thinking` for OpenAI-compatible chat, `thinking` block for Anthropic messages). `normal` sends nothing extra |
 | `effort` | | — | Reasoning effort: `low`, `medium`, `high`, `max` — adds `reasoning_effort` (chat), `reasoning.effort` (responses), or maps to the thinking budget (messages). Empty or `none` sends nothing |
 | `agents` | | — | Multi-agent review: `all` or comma-separated (see [Multi-Agent Review](#multi-agent-review)). Empty = custom agents only, or single review if none |
