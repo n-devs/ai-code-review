@@ -95,10 +95,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Mask API key in logs
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.api_key != '' }}
-        env:
-          API_KEY_INPUT: ${{ github.event.inputs.api_key }}
-        run: echo "::add-mask::$API_KEY_INPUT"
+        if: ${{ inputs.api_key != '' }}
+        run: |
+          key=$(jq -r '.inputs.api_key // empty' "$GITHUB_EVENT_PATH")
+          if [ -n "$key" ]; then
+            echo "::add-mask::$key"
+          fi
       - uses: actions/checkout@v4
       - uses: n-devs/ai-code-review@v2
         with:
@@ -116,7 +118,7 @@ With this setup the workflow runs automatically on PR activity, and you can also
 
 To make the workflow **manual-only** (no automatic run when a PR is created), remove the `pull_request` trigger and keep only `workflow_dispatch` — inputs can then be referenced directly as `${{ inputs.<name> }}`.
 
-> ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above only masks the key as `***` in the run logs. Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
+> ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above masks the key as `***` in the run logs (it reads the key from `$GITHUB_EVENT_PATH` at runtime, because values passed via `env:` are printed in the step's log header before masking takes effect). Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
 
 ## Inputs
 

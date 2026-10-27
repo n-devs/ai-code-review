@@ -58,11 +58,15 @@ jobs:
   ai-code-review:
     runs-on: ubuntu-latest
     steps:
+      # อ่าน key จาก event payload แทน env/expression เพราะ GitHub พิมพ์ค่า env ของ step
+      # ลง log ก่อนที่ add-mask จะทำงาน
       - name: Mask API key in logs
         if: ${{ inputs.api_key != '' }}
-        env:
-          API_KEY_INPUT: ${{ inputs.api_key }}
-        run: echo "::add-mask::$API_KEY_INPUT"
+        run: |
+          key=$(jq -r '.inputs.api_key // empty' "$GITHUB_EVENT_PATH")
+          if [ -n "$key" ]; then
+            echo "::add-mask::$key"
+          fi
 
       - name: Checkout
         uses: actions/checkout@v4
