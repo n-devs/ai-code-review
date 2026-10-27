@@ -9,6 +9,45 @@ on:
         description: "Pull request number to review"
         required: true
         type: string
+      provider:
+        description: "AI provider"
+        required: false
+        type: choice
+        default: "github-azure-models"
+        options:
+          - github-azure-models
+          - github-models
+          - copilot
+          - openai
+          - anthropic
+          - openrouter
+          - ollama
+          - xai
+          - zai
+          - google
+          - azure
+          - aws
+          - custom
+      model:
+        description: "AI model name (e.g. gpt-4o, openai/gpt-4o-mini, claude-3-5-sonnet-20241022)"
+        required: false
+        default: "gpt-4o"
+        type: string
+      api_key:
+        description: "AI API key (leave empty to use GITHUB_TOKEN)"
+        required: false
+        default: ""
+        type: string
+      files_changed:
+        description: "Post inline review comments on changed files (Files changed tab)"
+        required: false
+        default: false
+        type: boolean
+      username:
+        description: "Review only changes by this GitHub username ('all' = everyone, empty = you)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   pull-requests: write
@@ -19,6 +58,12 @@ jobs:
   ai-code-review:
     runs-on: ubuntu-latest
     steps:
+      - name: Mask API key in logs
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.api_key != '' }}
+        env:
+          API_KEY_INPUT: ${{ github.event.inputs.api_key }}
+        run: echo "::add-mask::$API_KEY_INPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -31,7 +76,11 @@ jobs:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
-          api_key: ${{ secrets.GITHUB_TOKEN }}
+          provider: ${{ github.event.inputs.provider || 'github-azure-models' }}
+          model: ${{ github.event.inputs.model || 'gpt-4o' }}
+          api_key: ${{ github.event.inputs.api_key || secrets.GITHUB_TOKEN }}
+          files_changed: ${{ github.event.inputs.files_changed || 'false' }}
+          username: ${{ github.event.inputs.username || github.actor }}
           language: Thai
           max_tokens: 2048
           max_diff_chars: 10000

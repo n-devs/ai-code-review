@@ -1,0 +1,121 @@
+name: Deploy Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v2.1.0). Release notes must exist at docs/release/v2.1.0.md or the deploy is aborted."
+        required: true
+        type: string
+      branch:
+        description: "Branch to release from (e.g. main, release/v2.1). Defaults to the branch this workflow runs on."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate version & release notes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      notes_path: ${{ steps.resolve.outputs.notes_path }}
+      branch: ${{ steps.resolve.outputs.branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref_name }}
+          fetch-depth: 0 # full history so existing tags are visible
+
+      - name: Resolve and validate version
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
+        run: |
+          set -euo pipefail
+          echo "Releasing version from branch: ${INPUT_BRANCH}"
+          VERSION="${INPUT_VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$INPUT_VERSION'. Expected a semantic version like v2.1.0"
+            exit 1
+          fi
+
+          NOTES="docs/release/v${VERSION}.md"
+          if [[ ! -f "$NOTES" ]]; then
+            echo "::error::No release notes found at $NOTES for version v${VERSION}. The specified version does not match docs/release/<version>.md — create the file first. Deploy aborted."
+            exit 1
+          fi
+          if [[ ! -s "$NOTES" ]]; then
+            echo "::error::Release notes file $NOTES is empty. Deploy aborted."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Tag v${VERSION} already exists — this version was already released. Bump the version and add new notes under docs/release/."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "notes_path=$NOTES" >> "$GITHUB_OUTPUT"
+          echo "branch=$INPUT_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes preview
+        run: cat "${{ steps.resolve.outputs.notes_path }}"
+
+  deploy:
+    name: Deploy release
+    needs: validate # never runs when the version does not match docs/release/<version>.md
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.branch }}
+
+      - name: Build and verify dist is up to date
+        run: |
+          npm ci
+          npm run build
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ is out of date with src/. Run 'npm run build' and commit dist/ before releasing."
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Releasing v${VERSION} from branch: ${{ needs.validate.outputs.branch }} ($(git rev-parse --short HEAD))"
+          FLAGS=()
+          if [[ "$VERSION" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          gh release create "v${VERSION}" "${FLAGS[@]}" \
+            --title "v${VERSION}" \
+            --target "$RELEASE_SHA" \
+            --notes-file "$NOTES_PATH"
+
+      - name: Move major version tag to this release
+        run: |
+          set -euo pipefail
+          MAJOR="${VERSION%%.*}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$MAJOR" HEAD
+          git push origin "refs/tags/$MAJOR" --force

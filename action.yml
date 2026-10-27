@@ -46,6 +46,14 @@ inputs:
     description: "Language for the code review response (e.g. English, Thai, Japanese)"
     required: false
     default: "English"
+  files_changed:
+    description: "Set to 'true' to have the AI review each changed file and post inline review comments on the diff (Files changed tab) instead of one combined PR comment"
+    required: false
+    default: "false"
+  username:
+    description: "GitHub username whose changes to review — only files changed in commits authored by this user are reviewed. Use 'all' to review everyone. Defaults to the user who triggered the workflow run (GITHUB_ACTOR)."
+    required: false
+    default: ""
 
 runs:
   using: "node24"

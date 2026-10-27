@@ -2314,6 +2314,10 @@ const MAX_DIFF_CHARS = parseInt(process.env.INPUT_MAX_DIFF_CHARS ?? process.env.
 const MAX_TOKENS = parseInt(process.env.INPUT_MAX_TOKENS ?? process.env.MAX_TOKENS ?? "4096", 10);
 const LANGUAGE = process.env.INPUT_LANGUAGE ?? process.env.LANGUAGE ?? "English";
 const TITLE = process.env.INPUT_TITLE ?? process.env.TITLE ?? "AI Code Review";
+const FILES_CHANGED = (process.env.INPUT_FILES_CHANGED ?? process.env.FILES_CHANGED ?? "false").toLowerCase() === "true";
+const MAX_INLINE_COMMENTS = 20;
+// "all" = review การเปลี่ยนแปลงของทุกคน, ไม่ระบุ = ใช้ user ที่ run workflow (GITHUB_ACTOR)
+const USERNAME = ((process.env.INPUT_USERNAME ?? "").trim() || process.env.GITHUB_ACTOR || "all").toLowerCase();
 const PROVIDER = (process.env.INPUT_PROVIDER ?? process.env.PROVIDER);
 const API_TYPE = (0, config_1.resolveApiType)(PROVIDER, process.env.INPUT_API_TYPE ?? process.env.INPUT_COMPLETION_TYPE ?? process.env.API_TYPE ?? process.env.COMPLETION_TYPE);
 const API_URL = (0, config_1.resolveApiUrl)(PROVIDER, API_TYPE, process.env.INPUT_API_URL ?? process.env.API_URL);
@@ -2346,9 +2350,7 @@ function fetchJson(url, options, body) {
         req.end();
     });
 }
-// 1. ดึงไฟล์ที่ถูกเปลี่ยนแปลง (Diff) จาก GitHub API
-async function getPrDiff() {
-    const url = `https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files`;
+function githubApiGet(url) {
     const options = {
         method: "GET",
         headers: {
@@ -2357,18 +2359,66 @@ async function getPrDiff() {
             "User-Agent": "ai-code-review",
         },
     };
-    const { status, data, text } = await fetchJson(url, options);
+    return fetchJson(url, options);
+}
+// 1. ดึงไฟล์ที่ถูกเปลี่ยนแปลง (Diff) จาก GitHub API
+async function getPrFiles() {
+    const { status, data, text } = await githubApiGet(`https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files`);
     if (status !== 200) {
         console.error(`GitHub API error: ${status} ${text.slice(0, 500)}`);
-        return "";
+        return [];
     }
     if (!Array.isArray(data)) {
         console.error(`Unexpected GitHub API response: ${text.slice(0, 500)}`);
-        return "";
+        return [];
     }
-    // รวบรวมชื่อไฟล์และ patch (ส่วนที่แก้ไข) แต่ถ้าไฟล์ใหญ่มากอาจต้องตัดบรรทัด
+    return data;
+}
+// รวมชื่อไฟล์ทั้งหมดจาก commits ของ PR ที่ author ตรงกับ username ที่ระบุ
+async function getFilenamesByCommitAuthor(username) {
+    const filenames = new Set();
+    const target = username.toLowerCase();
+    let page = 1;
+    while (page <= 3) { // รองรับสูงสุด 300 commits
+        const { status, data, text } = await githubApiGet(`https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/commits?per_page=100&page=${page}`);
+        if (status !== 200 || !Array.isArray(data)) {
+            console.error(`GitHub commits API error: ${status} ${text.slice(0, 500)}`);
+            return filenames;
+        }
+        for (const commit of data) {
+            if ((commit.author?.login ?? "").toLowerCase() !== target)
+                continue;
+            const detail = await githubApiGet(`https://api.github.com/repos/${REPO}/commits/${commit.sha}`);
+            if (detail.status !== 200) {
+                console.error(`Commit API error for ${commit.sha.slice(0, 7)}: ${detail.status}`);
+                continue;
+            }
+            for (const file of detail.data.files ?? [])
+                filenames.add(file.filename);
+        }
+        if (data.length < 100)
+            break;
+        page++;
+    }
+    return filenames;
+}
+async function filterFilesByUser(files) {
+    if (USERNAME === "all")
+        return files;
+    console.log(`Filtering changed files by commit author: ${USERNAME}`);
+    const filesByUser = await getFilenamesByCommitAuthor(USERNAME);
+    if (!filesByUser.size) {
+        console.log(`No commits authored by '${USERNAME}' found in this PR.`);
+        return [];
+    }
+    const filtered = files.filter((f) => filesByUser.has(f.filename));
+    console.log(`${filtered.length} file(s) changed by '${USERNAME}': ${filtered.map((f) => f.filename).join(", ") || "(none)"}`);
+    return filtered;
+}
+// รวม diff ของทุกไฟล์เป็นข้อความเดียว (โหมด comment รวมทั้ง PR)
+function buildDiffText(files) {
     let diffContent = "";
-    for (const file of data) {
+    for (const file of files) {
         if (file.patch) {
             diffContent += `File: ${file.filename}\n${file.patch}\n\n`;
             if (diffContent.length > MAX_DIFF_CHARS) {
@@ -2379,10 +2429,131 @@ async function getPrDiff() {
     }
     return diffContent;
 }
+// --- โหมด files_changed: review ทีละไฟล์แล้วโพสต์ inline comment บน diff ---
+// หมายเลขบรรทัดฝั่งไฟล์ใหม่ที่แปะ inline comment ได้ (เฉพาะบรรทัดที่อยู่ใน hunk ของ diff)
+function commentableLines(patch) {
+    const lines = [];
+    let newLine = 0; // 0 = ยังไม่เข้า hunk แรก (ข้ามส่วน header +++/---)
+    for (const raw of patch.split("\n")) {
+        const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(raw);
+        if (hunk) {
+            newLine = parseInt(hunk[1], 10);
+            continue;
+        }
+        if (newLine === 0 || raw.startsWith("\\") || raw.startsWith("-"))
+            continue;
+        lines.push(newLine++);
+    }
+    return lines;
+}
+function snapToNearestLine(target, valid) {
+    if (!valid.length)
+        return null;
+    let best = valid[0];
+    let bestDist = Math.abs(target - best);
+    for (const line of valid) {
+        const dist = Math.abs(target - line);
+        if (dist < bestDist) {
+            best = line;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+// คาดหวัง JSON array [{"line": 123, "comment": "..."}] — parseแบบยืดหยุ่น
+function parseInlineComments(raw) {
+    const cleaned = raw.replace(/```(?:json)?/gi, "").trim();
+    const start = cleaned.indexOf("[");
+    const end = cleaned.lastIndexOf("]");
+    if (start === -1 || end <= start)
+        return [];
+    let parsed;
+    try {
+        parsed = JSON.parse(cleaned.slice(start, end + 1));
+    }
+    catch {
+        return [];
+    }
+    if (!Array.isArray(parsed))
+        return [];
+    const items = [];
+    for (const entry of parsed) {
+        const record = entry;
+        const line = parseInt(String(record?.line), 10);
+        const comment = record?.comment;
+        if (!Number.isFinite(line) || typeof comment !== "string" || !comment.trim())
+            continue;
+        items.push({ line, comment: comment.trim() });
+    }
+    return items;
+}
+async function reviewFilesInline(files) {
+    const inline = [];
+    for (const file of files) {
+        let patch = file.patch ?? "";
+        if (patch.length > MAX_DIFF_CHARS) {
+            patch = patch.slice(0, MAX_DIFF_CHARS) + "\n... (patch truncated)";
+        }
+        const systemPrompt = `You are an expert Code Reviewer. You review one changed file and leave short, precise inline comments. ` +
+            `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`;
+        const userPrompt = `Review the diff below and list problems or improvements worth flagging.\n` +
+            `Return a JSON array; each item must be {"line": <line number in the NEW version of the file>, "comment": "<concise review comment>"}.\n` +
+            `Anchor each comment to the most relevant changed line. If nothing needs a comment, return [].\n\n` +
+            `File: ${file.filename}\n${patch}`;
+        console.log(`Reviewing ${file.filename} (${patch.length} chars)...`);
+        const result = await askAI(systemPrompt, userPrompt);
+        const valid = commentableLines(patch);
+        for (const item of parseInlineComments(result)) {
+            const line = snapToNearestLine(item.line, valid);
+            if (line === null)
+                continue;
+            inline.push({ path: file.filename, line, body: item.comment });
+            if (inline.length >= MAX_INLINE_COMMENTS)
+                break;
+        }
+        if (inline.length >= MAX_INLINE_COMMENTS) {
+            console.log(`Reached inline comment cap (${MAX_INLINE_COMMENTS}); skipping remaining files.`);
+            break;
+        }
+    }
+    if (!inline.length) {
+        console.log("AI left no inline comments.");
+        return;
+    }
+    await postInlineReview(inline);
+}
+// สร้าง PR review พร้อม inline comments ผูกกับบรรทัดใน tab Files changed
+async function postInlineReview(comments) {
+    const url = `https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/reviews`;
+    const provider = PROVIDER ?? "copilot";
+    const scope = USERNAME !== "all" ? ` — changes by @${USERNAME}` : "";
+    const payload = JSON.stringify({
+        body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`${scope}\n\nReviewed changed files: ${comments.length} inline comment(s).`,
+        event: "COMMENT",
+        comments: comments.map((c) => ({ path: c.path, line: c.line, body: c.body })),
+    });
+    const options = {
+        method: "POST",
+        headers: {
+            Authorization: `token ${GH_PAT}`,
+            Accept: "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload),
+            "User-Agent": "ai-code-review",
+        },
+    };
+    const { status, text } = await fetchJson(url, options, payload);
+    if (status >= 200 && status < 300) {
+        console.log(`Inline review posted successfully (${comments.length} comment(s)).`);
+        return;
+    }
+    console.error(`Failed to post inline review: ${status} ${text.slice(0, 300)}`);
+    console.log("Falling back to a single PR comment...");
+    const fallback = comments.map((c) => `**\`${c.path}:${c.line}\`**\n\n${c.body}`).join("\n\n");
+    await postCommentToPr(fallback);
+}
 // 2. ส่งข้อมูลไปถาม AI
-async function askAI(diffText) {
-    const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
-    const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diffText}`;
+async function askAI(systemPrompt, userPrompt) {
     console.log(`Using api_type: ${API_TYPE} (${API_URL})`);
     if ((0, config_1.isGithubModelsProvider)(PROVIDER, API_URL) && API_TYPE === "chat") {
         return askGitHubModels(systemPrompt, userPrompt);
@@ -2531,8 +2702,9 @@ async function askResponses(systemPrompt, userPrompt) {
 async function postCommentToPr(message) {
     const url = `https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments`;
     const provider = PROVIDER ?? "copilot";
+    const scope = USERNAME !== "all" ? ` — changes by @${USERNAME}` : "";
     const payload = JSON.stringify({
-        body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`\n\n${message}`,
+        body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`${scope}\n\n${message}`,
     });
     const options = {
         method: "POST",
@@ -2588,13 +2760,27 @@ async function main() {
         console.log("Exchanging GitHub PAT for Copilot session token...");
         API_KEY = await getCopilotToken(patForExchange);
     }
-    const diff = await getPrDiff();
+    const files = await filterFilesByUser(await getPrFiles());
+    if (FILES_CHANGED) {
+        const reviewable = files.filter((f) => f.patch);
+        if (!reviewable.length) {
+            console.log("No changed files with a diff to review.");
+            return;
+        }
+        console.log(`files_changed mode: reviewing ${reviewable.length} changed file(s) inline...`);
+        await reviewFilesInline(reviewable);
+        console.log("Done!");
+        return;
+    }
+    const diff = buildDiffText(files);
     if (!diff) {
         console.log("No diff found or diff is too large.");
     }
     else {
         console.log(`Diff size: ${diff.length} chars. Sending to AI...`);
-        const reviewResult = await askAI(diff);
+        const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
+        const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}`;
+        const reviewResult = await askAI(systemPrompt, userPrompt);
         console.log("Posting comment to GitHub...");
         await postCommentToPr(reviewResult);
         console.log("Done!");

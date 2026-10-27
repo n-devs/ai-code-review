@@ -32,7 +32,7 @@ jobs:
 
 ## Manual Run
 
-Trigger the review manually from the **Actions** tab and specify the PR number yourself:
+Trigger the review manually from the **Actions** tab and choose the provider, model, API key, and PR number yourself:
 
 ```yaml
 name: AI Code Review
@@ -45,6 +45,45 @@ on:
         description: "Pull request number to review"
         required: true
         type: string
+      provider:
+        description: "AI provider"
+        required: false
+        type: choice
+        default: "github-azure-models"
+        options:
+          - github-azure-models
+          - github-models
+          - copilot
+          - openai
+          - anthropic
+          - openrouter
+          - ollama
+          - xai
+          - zai
+          - google
+          - azure
+          - aws
+          - custom
+      model:
+        description: "AI model name (e.g. gpt-4o, openai/gpt-4o-mini, claude-3-5-sonnet-20241022)"
+        required: false
+        default: "gpt-4o"
+        type: string
+      api_key:
+        description: "AI API key (leave empty to use GITHUB_TOKEN)"
+        required: false
+        default: ""
+        type: string
+      files_changed:
+        description: "Post inline review comments on changed files (Files changed tab)"
+        required: false
+        default: false
+        type: boolean
+      username:
+        description: "Review only changes by this GitHub username ('all' = everyone, empty = you)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   pull-requests: write
@@ -55,16 +94,27 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
+      - name: Mask API key in logs
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.api_key != '' }}
+        env:
+          API_KEY_INPUT: ${{ github.event.inputs.api_key }}
+        run: echo "::add-mask::$API_KEY_INPUT"
       - uses: actions/checkout@v4
       - uses: n-devs/ai-code-review@v2
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
-          api_key: ${{ secrets.GITHUB_TOKEN }}
+          provider: ${{ github.event.inputs.provider || 'github-azure-models' }}
+          model: ${{ github.event.inputs.model || 'gpt-4o' }}
+          api_key: ${{ github.event.inputs.api_key || secrets.GITHUB_TOKEN }}
+          files_changed: ${{ github.event.inputs.files_changed || 'false' }}
+          username: ${{ github.event.inputs.username || github.actor }}
 ```
 
-With this setup the workflow runs automatically on PR activity, and you can also go to **Actions → AI Code Review → Run workflow** and enter a PR number to review any PR on demand.
+With this setup the workflow runs automatically on PR activity, and you can also go to **Actions → AI Code Review → Run workflow** to review any PR on demand with any provider/model. Enable **files_changed** to have the AI leave inline comments on the changed lines instead of one combined comment, and use **username** to scope the review to a single author's changes (`all` = everyone, leave empty = the user who runs the workflow).
+
+> ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above only masks the key as `***` in the run logs. Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
 
 ## Inputs
 
@@ -82,6 +132,8 @@ With this setup the workflow runs automatically on PR activity, and you can also
 | `max_tokens` | | `2048` | Maximum tokens in AI response |
 | `max_diff_chars` | | `10000` | Maximum characters of diff sent to AI |
 | `language` | | `English` | Language for the review response |
+| `files_changed` | | `false` | `true` = AI reviews each changed file and posts inline review comments on the diff (Files changed tab) instead of one combined PR comment |
+| `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user. `all` = everyone |
 
 ## Providers
 
@@ -300,3 +352,16 @@ npm install
 npm run build   # outputs dist/index.js via @vercel/ncc
 npm test        # runs unit tests via vitest
 ```
+
+## Deploy a release
+
+Releases are deployed manually via **Actions → Deploy Release → Run workflow** with a `version` input (e.g. `v2.1.0`) and an optional `branch` input to release from a specific branch (e.g. `release/v2.1`). It defaults to the branch the workflow runs on, and the release notes file is read from that branch too.
+
+The workflow only deploys when the specified version matches a release notes file at `docs/release/v<version>.md` (see [TEMPLATE.md](docs/release/TEMPLATE.md)) on the selected branch. If that file does not exist (or is empty, or the tag was already released), validation fails and nothing is deployed.
+
+What the deploy does:
+
+1. Validates the version format and the existence of `docs/release/v<version>.md`
+2. Rebuilds `dist/` and fails if the committed `dist/` is out of date with `src/`
+3. Creates the `v<version>` tag and a GitHub Release whose body is the release notes file
+4. Moves the major version tag (e.g. `v2`) to this release, so `n-devs/ai-code-review@v2` users get the update
