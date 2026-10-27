@@ -150,12 +150,16 @@ To make the workflow **manual-only** (no automatic run when a PR is created), re
 | `ollama` | `chat` | `http://localhost:11434/v1` | — | e.g. `llama3` |
 | `xai` | `chat` | `https://api.x.ai/v1` | API key (Grok) | e.g. `grok-3` |
 | `zai` | `chat` | `https://api.z.ai/api/coding/paas/v4` | API key (GLM) | provider-specific |
+| `qwencloud` | `chat` | `https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1` | API key (Qwen Cloud) | e.g. `qwen-plus`, `qwen-max` |
+| `qwencloud-plan` | `chat` | `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` | API key (Qwen Cloud plan) | e.g. `qwen-plus`, `qwen-max` |
 | `google` | `chat` | `https://generativelanguage.googleapis.com/v1beta/openai` | API key | e.g. `gemini-2.0-flash` |
 | `azure` | `chat` | ⚠️ requires `api_url` | `api-key` header | your deployment name |
 | `aws` | `chat` | ⚠️ requires `api_url` | API key | provider-specific |
 | `custom` | `chat` | ⚠️ requires `api_url` | API key | provider-specific |
 
 > **Note:** `copilot` provider exchanges a personal PAT for a short-lived session token automatically. `GITHUB_TOKEN` from GitHub Actions will not work for Copilot — use `github-azure-models`/`github-models` instead for zero-config setups.
+>
+> **Qwen Cloud** has two shorthands: `qwencloud` (regional endpoint `ap-southeast-1.maas.qwencloudapi.com`) and `qwencloud-plan` (token-plan endpoint `token-plan.maas.qwencloudapi.com`). Both default to the OpenAI-compatible endpoint — set `api_type: messages` to use their Anthropic-compatible endpoint instead (`…/apps/anthropic/messages`).
 >
 > **GitHub Models has two provider shorthands:**
 > - `github-azure-models` (default) uses the legacy `models.inference.ai.azure.com` endpoint with plain model names (`gpt-4o`).
@@ -264,6 +268,33 @@ To make the workflow **manual-only** (no automatic run when a PR is created), re
     provider: xai
     api_key: ${{ secrets.XAI_API_KEY }}
     model: grok-3
+```
+
+### Qwen Cloud (OpenAI-compatible)
+
+```yaml
+- uses: n-devs/ai-code-review@v2
+  with:
+    gh_pat: ${{ secrets.GITHUB_TOKEN }}
+    repo: ${{ github.repository }}
+    pr_number: ${{ github.event.pull_request.number }}
+    provider: qwencloud
+    api_key: ${{ secrets.QWEN_API_KEY }}
+    model: qwen-plus
+```
+
+### Qwen Cloud (Anthropic-compatible, token-plan)
+
+```yaml
+- uses: n-devs/ai-code-review@v2
+  with:
+    gh_pat: ${{ secrets.GITHUB_TOKEN }}
+    repo: ${{ github.repository }}
+    pr_number: ${{ github.event.pull_request.number }}
+    provider: qwencloud-plan
+    api_key: ${{ secrets.QWEN_API_KEY }}
+    model: qwen-plus
+    api_type: messages
 ```
 
 ### OpenRouter

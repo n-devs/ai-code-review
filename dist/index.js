@@ -2207,7 +2207,7 @@ var __rewriteRelativeImportExtension;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.REQUIRES_API_URL = exports.PROVIDER_DEFAULT_TYPE = exports.PROVIDER_BASES = exports.API_TYPE_PATHS = void 0;
+exports.REQUIRES_API_URL = exports.PROVIDER_DEFAULT_TYPE = exports.PROVIDER_TYPE_BASES = exports.PROVIDER_BASES = exports.API_TYPE_PATHS = void 0;
 exports.resolveApiType = resolveApiType;
 exports.resolveApiUrl = resolveApiUrl;
 exports.isCopilotUrl = isCopilotUrl;
@@ -2230,8 +2230,21 @@ exports.PROVIDER_BASES = {
     ollama: "http://localhost:11434/v1",
     xai: "https://api.x.ai/v1",
     zai: "https://api.z.ai/api/coding/paas/v4",
+    // Qwen Cloud — OpenAI-compatible endpoint (base สำหรับ chat/responses/text)
+    qwencloud: "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+    "qwencloud-plan": "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
     google: "https://generativelanguage.googleapis.com/v1beta/openai",
     // azure/aws/custom: must provide api_url
+};
+// Base URL แยกตาม api_type สำหรับ provider ที่มี endpoint ต่างกันในแต่ละโปรโตคอล
+// (เช่น Qwen Cloud: OpenAI-compatible อยู่ที่ /compatible-mode/v1 แต่ Anthropic-compatible อยู่ที่ /apps/anthropic)
+exports.PROVIDER_TYPE_BASES = {
+    qwencloud: {
+        messages: "https://ap-southeast-1.maas.qwencloudapi.com/apps/anthropic",
+    },
+    "qwencloud-plan": {
+        messages: "https://token-plan.maas.qwencloudapi.com/apps/anthropic",
+    },
 };
 exports.PROVIDER_DEFAULT_TYPE = {
     anthropic: "messages",
@@ -2243,7 +2256,9 @@ function resolveApiType(provider, envApiType) {
 function resolveApiUrl(provider, apiType, override) {
     if (override)
         return override;
-    const base = ((provider && exports.PROVIDER_BASES[provider]) ?? "https://api.githubcopilot.com").replace(/\/$/, "");
+    const base = ((provider && exports.PROVIDER_TYPE_BASES[provider]?.[apiType]) ??
+        (provider && exports.PROVIDER_BASES[provider]) ??
+        "https://api.githubcopilot.com").replace(/\/$/, "");
     return base + exports.API_TYPE_PATHS[apiType];
 }
 function isCopilotUrl(url) {

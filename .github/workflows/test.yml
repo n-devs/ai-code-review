@@ -22,6 +22,8 @@ on:
           - ollama
           - xai
           - zai
+          - qwencloud
+          - qwencloud-plan
           - google
           - azure
           - aws
