@@ -114,6 +114,8 @@ jobs:
 
 With this setup the workflow runs automatically on PR activity, and you can also go to **Actions → AI Code Review → Run workflow** to review any PR on demand with any provider/model. Enable **files_changed** to have the AI leave inline comments on the changed lines instead of one combined comment, and use **username** to scope the review to a single author's changes (`all` = everyone, leave empty = the user who runs the workflow).
 
+To make the workflow **manual-only** (no automatic run when a PR is created), remove the `pull_request` trigger and keep only `workflow_dispatch` — inputs can then be referenced directly as `${{ inputs.<name> }}`.
+
 > ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above only masks the key as `***` in the run logs. Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
 
 ## Inputs

@@ -1,8 +1,6 @@
 name: Test AI Code Review Action
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -59,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Mask API key in logs
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.api_key != '' }}
+        if: ${{ inputs.api_key != '' }}
         env:
-          API_KEY_INPUT: ${{ github.event.inputs.api_key }}
+          API_KEY_INPUT: ${{ inputs.api_key }}
         run: echo "::add-mask::$API_KEY_INPUT"
 
       - name: Checkout
@@ -75,12 +73,12 @@ jobs:
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
-          pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
-          provider: ${{ github.event.inputs.provider || 'github-azure-models' }}
-          model: ${{ github.event.inputs.model || 'gpt-4o' }}
-          api_key: ${{ github.event.inputs.api_key || secrets.GITHUB_TOKEN }}
-          files_changed: ${{ github.event.inputs.files_changed || 'false' }}
-          username: ${{ github.event.inputs.username || github.actor }}
+          pr_number: ${{ inputs.pr_number }}
+          provider: ${{ inputs.provider }}
+          model: ${{ inputs.model }}
+          api_key: ${{ inputs.api_key || secrets.GITHUB_TOKEN }}
+          files_changed: ${{ inputs.files_changed }}
+          username: ${{ inputs.username || github.actor }}
           language: Thai
           max_tokens: 2048
           max_diff_chars: 10000
