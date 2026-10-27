@@ -7,11 +7,7 @@ on:
         description: "Version to release (e.g. v2.1.0). Release notes must exist at docs/release/v2.1.0.md or the deploy is aborted."
         required: true
         type: string
-      branch:
-        description: "Branch to release from (e.g. main, release/v2.1). Defaults to the branch this workflow runs on."
-        required: false
-        default: ""
-        type: string
+        default: "v2.1.0"
 
 permissions:
   contents: write
@@ -28,22 +24,19 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
       notes_path: ${{ steps.resolve.outputs.notes_path }}
-      branch: ${{ steps.resolve.outputs.branch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch || github.ref_name }}
           fetch-depth: 0 # full history so existing tags are visible
 
       - name: Resolve and validate version
         id: resolve
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
-          INPUT_BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
         run: |
           set -euo pipefail
-          echo "Releasing version from branch: ${INPUT_BRANCH}"
+          echo "Releasing version from branch: ${GITHUB_REF_NAME}"
           VERSION="${INPUT_VERSION#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Invalid version '$INPUT_VERSION'. Expected a semantic version like v2.1.0"
@@ -68,7 +61,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "notes_path=$NOTES" >> "$GITHUB_OUTPUT"
-          echo "branch=$INPUT_BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Release notes preview
         run: cat "${{ steps.resolve.outputs.notes_path }}"
@@ -83,8 +75,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.branch }}
 
       - name: Build and verify dist is up to date
         run: |
@@ -100,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "Releasing v${VERSION} from branch: ${{ needs.validate.outputs.branch }} ($(git rev-parse --short HEAD))"
+          echo "Releasing v${VERSION} from branch: ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
           FLAGS=()
           if [[ "$VERSION" == *-* ]]; then
             FLAGS+=(--prerelease)

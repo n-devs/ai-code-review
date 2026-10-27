@@ -355,7 +355,7 @@ npm test        # runs unit tests via vitest
 
 ## Deploy a release
 
-Releases are deployed manually via **Actions → Deploy Release → Run workflow** with a `version` input (e.g. `v2.1.0`) and an optional `branch` input to release from a specific branch (e.g. `release/v2.1`). It defaults to the branch the workflow runs on, and the release notes file is read from that branch too.
+Releases are deployed manually via **Actions → Deploy Release → Run workflow** with a `version` input (e.g. `v2.1.0`). Pick the branch to release from in GitHub's **Use workflow from** dropdown at the top of the Run workflow form — the branch list is filled in automatically. The release notes file is read from the selected branch and the release tag points at its head commit.
 
 The workflow only deploys when the specified version matches a release notes file at `docs/release/v<version>.md` (see [TEMPLATE.md](docs/release/TEMPLATE.md)) on the selected branch. If that file does not exist (or is empty, or the tag was already released), validation fails and nothing is deployed.
 
