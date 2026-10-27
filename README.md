@@ -84,6 +84,25 @@ on:
         required: false
         default: ""
         type: string
+      mode:
+        description: "Model mode (thinking enables reasoning mode)"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - thinking
+      effort:
+        description: "Reasoning effort (none = don't send)"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - low
+          - medium
+          - high
+          - max
 
 permissions:
   pull-requests: write
@@ -112,6 +131,8 @@ jobs:
           api_key: ${{ github.event.inputs.api_key || secrets.GITHUB_TOKEN }}
           files_changed: ${{ github.event.inputs.files_changed || 'false' }}
           username: ${{ github.event.inputs.username || github.actor }}
+          mode: ${{ github.event.inputs.mode || 'normal' }}
+          effort: ${{ inputs.effort != 'none' && inputs.effort || '' }}
 ```
 
 With this setup the workflow runs automatically on PR activity, and you can also go to **Actions → AI Code Review → Run workflow** to review any PR on demand with any provider/model. Enable **files_changed** to have the AI leave inline comments on the changed lines instead of one combined comment, and use **username** to scope the review to a single author's changes (`all` = everyone, leave empty = the user who runs the workflow).
@@ -119,6 +140,109 @@ With this setup the workflow runs automatically on PR activity, and you can also
 To make the workflow **manual-only** (no automatic run when a PR is created), remove the `pull_request` trigger and keep only `workflow_dispatch` — inputs can then be referenced directly as `${{ inputs.<name> }}`.
 
 > ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above masks the key as `***` in the run logs (it reads the key from `$GITHUB_EVENT_PATH` at runtime, because values passed via `env:` are printed in the step's log header before masking takes effect). Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
+
+## Skills
+
+Skills are knowledge modules injected into **every agent's** system prompt when enabled — each one focuses the review on a specific area.
+
+**Built-in skills:**
+
+| Skill | Focus |
+|---|---|
+| `security` | Injection, XSS, auth checks, IDOR, secrets, input validation, SSRF |
+| `testing` | Coverage of changed behavior, edge cases, meaningful assertions, deterministic tests |
+| `performance` | N+1 queries, missing indexes, unbounded queries, O(n²) hot paths, caching |
+| `clean-code` | Naming, small functions, guard clauses, DRY, dead code, magic numbers |
+| `error-handling` | No silent swallowing, timeouts, retries, resource cleanup |
+| `api-contract` | REST conventions, breaking changes, payload validation, versioning |
+
+**Selecting skills** — the `skills` input:
+- `auto` — picked from the diff content (always security/clean-code/error-handling/testing; adds `performance` for query/loop-heavy diffs and `api-contract` when routes/handlers change)
+- `all` — every registered skill
+- comma-separated names, e.g. `security,performance` — includes custom skills
+- empty (default) — disabled
+
+**Adding / importing your own skills:**
+
+```yaml
+# 1) Inline JSON
+custom_skills: |
+  [{"name": "k8s", "description": "Kubernetes review", "content": "- Check resource limits...\n- Check liveness/readiness probes"}]
+
+# 2) Import a folder of markdown files from the repo
+skills_path: .github/ai-skills
+```
+
+Each `*.md` file in the folder becomes a skill named after the file (an optional first-line `# Title` becomes its description). Later definitions override earlier ones with the same name.
+
+## Multi-Agent Review
+
+Set `agents: all` (or a comma-separated subset) to run the review as four AI agents with different roles. Each agent reviews independently and its findings are posted in its own section (or prefixed inline comments in `files_changed` mode).
+
+| Agent | Role | Focus |
+|---|---|---|
+| `author` | 🧑‍💻 Author (Self-Review) | Self-reviews their own code: explains how the code works (what each part does and why) and flags leftover debug code — plus a deterministic **PR size check** against the 200–400 changed-lines guideline |
+| `primary` | 🔍 Primary Reviewer | Business logic and correctness, edge cases, error handling, readability, and whether unit/integration tests cover the real behavior |
+| `specialist` | 🛡️ Specialist Reviewer | System architecture, scalability, overall impact, security vulnerabilities (injection, auth, secrets), and database performance in critical paths — holds final approval for core/production systems |
+| `checklist` | 📋 Code Review Checklist | Walks through a standard 12-item review checklist (correctness, readability, error handling, edge cases, security, performance, tests, docs, debug leftovers, compatibility, dependencies, logging) and reports ✅/⚠️/❌ per item as a table |
+
+```yaml
+- uses: n-devs/ai-code-review@v2
+  with:
+    gh_pat: ${{ secrets.GITHUB_TOKEN }}
+    repo: ${{ github.repository }}
+    pr_number: ${{ github.event.pull_request.number }}
+    api_key: ${{ secrets.GITHUB_TOKEN }}
+    agents: all                  # or e.g. "primary,specialist"
+    files_changed: true          # optional: inline comments prefixed with the agent name
+```
+
+> Note: each agent is a separate AI call per diff (or per file in `files_changed` mode), so runtime and token usage grow with the number of agents.
+
+### Custom Agents
+
+Use `custom_agents` (a JSON array) to **override a built-in agent** or **add your own agent**:
+
+```yaml
+- uses: n-devs/ai-code-review@v2
+  with:
+    gh_pat: ${{ secrets.GITHUB_TOKEN }}
+    repo: ${{ github.repository }}
+    pr_number: ${{ github.event.pull_request.number }}
+    api_key: ${{ secrets.GITHUB_TOKEN }}
+    agents: primary,db          # run the (overridden) primary + the custom "db" agent
+    custom_agents: |
+      [
+        {
+          "name": "primary",
+          "persona": "You are a strict Primary Reviewer for a fintech team. Check business logic, edge cases, error handling, readability, and test coverage. Flag anything that could affect money movement."
+        },
+        {
+          "name": "db",
+          "label": "🗄️ DBA Reviewer",
+          "persona": "You are a DBA reviewing this change. Check schema changes, query performance (N+1, missing indexes), transaction usage, and migration safety."
+        }
+      ]
+```
+
+Rules:
+- **`name` matching a built-in** (`author`, `primary`, `specialist`, `checklist`) → overrides its `persona`/`label`; anything you don't set keeps the default
+- **New `name`** → adds a new agent; `label` is optional (defaults to the name), `persona` is the agent's role prompt
+- Custom names can be used in the `agents` list, and `agents: all` runs built-ins **plus** customs
+- If `agents` is empty, only the new custom agents run (overrides alone need the agent to be selected)
+- Every agent (built-in or custom) supports `web_search`, `mode`/`effort`, and both review modes
+
+### Web Search
+
+Set `web_search: true` to let **every agent** look things up on the web while reviewing (docs, APIs, CVEs, best practices). How it works depends on the API type:
+
+| `api_type` | Mechanism |
+|---|---|
+| `messages` (Anthropic) | Native server-side `web_search` tool — the model searches by itself |
+| `responses` (OpenAI) | Native `web_search` tool |
+| `chat` / GitHub Models | Function-calling loop: the model calls a `web_search` tool and the action searches DuckDuckGo (no API key needed, up to 3 rounds) and feeds results back |
+
+> Requires a model/provider that supports tools — providers without tool support may reject the request. Combined with `agents: all`, each agent can search independently.
 
 ## Inputs
 
@@ -137,7 +261,15 @@ To make the workflow **manual-only** (no automatic run when a PR is created), re
 | `max_diff_chars` | | `10000` | Maximum characters of diff sent to AI |
 | `language` | | `English` | Language for the review response |
 | `files_changed` | | `false` | `true` = AI reviews each changed file and posts inline review comments on the diff (Files changed tab) instead of one combined PR comment |
-| `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user. `all` = everyone |
+| `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user, who is @mentioned in the comment. `all` = everyone, with each author @mentioned next to their files |
+| `mode` | | `normal` | `thinking` = enable thinking/reasoning mode where supported (`enable_thinking` for OpenAI-compatible chat, `thinking` block for Anthropic messages). `normal` sends nothing extra |
+| `effort` | | — | Reasoning effort: `low`, `medium`, `high`, `max` — adds `reasoning_effort` (chat), `reasoning.effort` (responses), or maps to the thinking budget (messages). Empty or `none` sends nothing |
+| `agents` | | — | Multi-agent review: `all` or comma-separated (see [Multi-Agent Review](#multi-agent-review)). Empty = custom agents only, or single review if none |
+| `custom_agents` | | — | JSON array to override built-in agents or add new ones (see [Custom Agents](#custom-agents)) |
+| `skills` | | — | Skills injected into every agent's prompt: `auto`, `all`, comma-separated names, or empty (see [Skills](#skills)) |
+| `custom_skills` | | — | Add your own skills as a JSON array (see [Skills](#skills)) |
+| `skills_path` | | — | Import skills from a folder of `*.md` files in the repo, e.g. `.github/ai-skills` |
+| `web_search` | | `false` | `true` = let the AI search the web during review (native tool for Anthropic messages / OpenAI responses; function-calling loop via DuckDuckGo for chat / GitHub Models — model must support tools) |
 
 ## Providers
 

@@ -51,9 +51,41 @@ inputs:
     required: false
     default: "false"
   username:
-    description: "GitHub username whose changes to review — only files changed in commits authored by this user are reviewed. Use 'all' to review everyone. Defaults to the user who triggered the workflow run (GITHUB_ACTOR)."
+    description: "GitHub username whose changes to review — only files changed in commits authored by this user are reviewed, and the user is @mentioned in the review comment. Use 'all' to review everyone — each author is then @mentioned with their files. Defaults to the user who triggered the workflow run (GITHUB_ACTOR)."
     required: false
     default: ""
+  mode:
+    description: "Model reasoning mode: 'thinking' enables thinking/reasoning mode for models that support it (enable_thinking for OpenAI-compatible chat, thinking block for Anthropic messages). 'normal' (default) sends no extra params."
+    required: false
+    default: "normal"
+  effort:
+    description: "Reasoning effort for thinking models: low, medium, high, or max — adds reasoning_effort (chat), reasoning.effort (responses), or maps to the thinking budget (messages). Empty or 'none' (default) sends nothing."
+    required: false
+    default: ""
+  agents:
+    description: "Multi-agent review: 'all' or comma-separated list — built-ins: author, primary, specialist, checklist; plus any names defined in custom_agents. Empty = custom agents only (or single review if none)."
+    required: false
+    default: ""
+  custom_agents:
+    description: "Customize or add agents as a JSON array: [{\"name\": \"primary\", \"persona\": \"...\"}] overrides a built-in agent (author/primary/specialist/checklist); a new name adds a new agent. Optional 'label' is shown in the report. Refer to custom names in 'agents', or 'all' to run everything."
+    required: false
+    default: ""
+  skills:
+    description: "Skills injected into every agent's prompt: comma-separated skill names, 'all', 'auto' (picked by diff content), or empty to disable. Built-ins: security, testing, performance, clean-code, error-handling, api-contract — plus any custom_skills/skills_path entries."
+    required: false
+    default: ""
+  custom_skills:
+    description: "Add your own skills as a JSON array: [{\"name\": \"k8s\", \"description\": \"...\", \"content\": \"- check ...\"}]. 'name' and 'content' required."
+    required: false
+    default: ""
+  skills_path:
+    description: "Import skills from a folder of markdown files in the repo (e.g. .github/ai-skills). Each *.md file becomes a skill named after the file; an optional first-line '# Title' is its description."
+    required: false
+    default: ""
+  web_search:
+    description: "Set to 'true' to let the AI search the web during review. Uses native web search for Anthropic messages / OpenAI responses, and a web_search function-calling loop (DuckDuckGo, no key needed) for chat/GitHub Models. Requires a model/provider that supports tools."
+    required: false
+    default: "false"
 
 runs:
   using: "node24"

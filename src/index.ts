@@ -1,4 +1,6 @@
 import * as https from "https";
+import * as fs from "fs";
+import * as path from "path";
 import {
   type ApiType,
   type Provider,
@@ -25,6 +27,343 @@ const FILES_CHANGED = (process.env.INPUT_FILES_CHANGED ?? process.env.FILES_CHAN
 const MAX_INLINE_COMMENTS = 20;
 // "all" = review การเปลี่ยนแปลงของทุกคน, ไม่ระบุ = ใช้ user ที่ run workflow (GITHUB_ACTOR)
 const USERNAME = ((process.env.INPUT_USERNAME ?? "").trim() || process.env.GITHUB_ACTOR || "all").toLowerCase();
+// โหมด thinking/reasoning ของโมเดล (ใช้ได้เฉพาะโมเดล/ผู้ให้บริการที่รองรับ)
+const MODE = (process.env.INPUT_MODE ?? process.env.MODE ?? "normal").trim().toLowerCase();
+// "none" = ไม่ส่ง (ใช้เป็น default ใน dropdown ของ workflow)
+const EFFORT_RAW = (process.env.INPUT_EFFORT ?? process.env.EFFORT ?? "").trim().toLowerCase();
+const EFFORT = EFFORT_RAW === "none" ? "" : EFFORT_RAW;
+const VALID_EFFORTS = ["low", "medium", "high", "max"];
+if (EFFORT && !VALID_EFFORTS.includes(EFFORT)) {
+  console.warn(`Invalid effort '${EFFORT}' — ignored (valid: ${VALID_EFFORTS.join(", ")}).`);
+}
+
+// Multi-agent review: author (self-review) / primary (peer) / specialist (tech lead + security/DBA)
+type ReviewAgent = "author" | "primary" | "specialist" | "checklist";
+const AGENT_ORDER: ReviewAgent[] = ["author", "primary", "specialist", "checklist"];
+const AGENT_PROFILES: Record<ReviewAgent, { label: string; persona: string }> = {
+  author: {
+    label: "🧑‍💻 Author (Self-Review)",
+    persona:
+      "You are the Author of this change reviewing your own code before opening the pull request. " +
+      "Explain how your code works: walk through the changed code and describe what each part does and why. " +
+      "While explaining, self-review honestly and flag any leftover debug code or temporary artifacts " +
+      "you should remove before asking teammates to review.",
+  },
+  primary: {
+    label: "🔍 Primary Reviewer",
+    persona:
+      "You are the Primary Reviewer, a peer developer on the same team. " +
+      "Check business logic and correctness, edge cases, error handling, and readability. " +
+      "Verify whether unit/integration tests cover the real behavior — call out missing tests explicitly.",
+  },
+  specialist: {
+    label: "🛡️ Specialist Reviewer",
+    persona:
+      "You are a Senior Specialist Reviewer (Tech Lead with Security and DBA expertise) holding final approval " +
+      "authority for core/production systems. Check system architecture, scalability, and overall impact; " +
+      "look for security vulnerabilities (injection, auth, secrets, unsafe input handling) " +
+      "and database performance issues in critical paths.",
+  },
+  checklist: {
+    label: "📋 Code Review Checklist",
+    persona:
+      "You are a systematic Checklist Reviewer. Go through the standard code review checklist below, one item at a time, " +
+      "and give each item a status — ✅ pass, ⚠️ needs attention, ❌ fail, or ➖ not applicable — with a short note. " +
+      "Present the result as a markdown table with columns: | # | Item | Status | Note |.\n" +
+      "Checklist:\n" +
+      "1. Correctness — logic matches the intent of the change\n" +
+      "2. Naming and readability\n" +
+      "3. Error handling — errors caught with meaningful messages\n" +
+      "4. Edge cases — null/empty/boundary/large inputs\n" +
+      "5. Security — input validation, injection, secrets, auth\n" +
+      "6. Performance — N+1 queries, unnecessary loops, memory\n" +
+      "7. Tests — unit/integration coverage for the changed behavior\n" +
+      "8. Documentation/comments updated where needed\n" +
+      "9. No leftover debug code or TODO markers\n" +
+      "10. Backward compatibility — breaking changes flagged\n" +
+      "11. Dependencies — no unnecessary new deps, versions pinned\n" +
+      "12. Logging — appropriate level, no sensitive data logged",
+  },
+};
+const AGENTS_RAW = (process.env.INPUT_AGENTS ?? process.env.AGENTS ?? "").trim().toLowerCase();
+
+// --- Custom agents: override built-in หรือเพิ่ม agent ใหม่ผ่าน JSON array ---
+// รูปแบบ: [{"name": "primary", "persona": "..."}] (override) หรือ [{"name": "db", "label": "🗄️ DBA", "persona": "..."}] (agent ใหม่)
+interface CustomAgentDef {
+  name?: unknown;
+  label?: unknown;
+  persona?: unknown;
+}
+
+function parseCustomAgents(raw: string): Array<{ name: string; label?: string; persona?: string }> {
+  const cleaned = raw.trim().replace(/```(?:json)?/gi, "").trim();
+  if (!cleaned) return [];
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start === -1 || end <= start) {
+    console.warn("custom_agents: no JSON array found — ignored.");
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch (err) {
+    console.warn(`custom_agents: invalid JSON — ignored (${(err as Error).message}).`);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn("custom_agents: expected a JSON array — ignored.");
+    return [];
+  }
+  const defs: Array<{ name: string; label?: string; persona?: string }> = [];
+  for (const entry of parsed) {
+    const record = entry as CustomAgentDef;
+    if (typeof record?.name !== "string" || !record.name.trim()) {
+      console.warn("custom_agents: entry without a 'name' — skipped.");
+      continue;
+    }
+    defs.push({
+      name: record.name.trim(),
+      label: typeof record.label === "string" && record.label.trim() ? record.label.trim() : undefined,
+      persona: typeof record.persona === "string" && record.persona.trim() ? record.persona.trim() : undefined,
+    });
+  }
+  return defs;
+}
+
+const CUSTOM_AGENTS = parseCustomAgents(process.env.INPUT_CUSTOM_AGENTS ?? process.env.CUSTOM_AGENTS ?? "");
+
+// registry รวม built-in + custom (ชื่อซ้ำกับ built-in = override)
+const AGENT_REGISTRY = new Map<string, { label: string; persona: string }>(
+  AGENT_ORDER.map((a) => [a as string, AGENT_PROFILES[a]])
+);
+for (const def of CUSTOM_AGENTS) {
+  const existing = AGENT_REGISTRY.get(def.name);
+  AGENT_REGISTRY.set(def.name, {
+    label: def.label ?? existing?.label ?? def.name,
+    persona: def.persona ?? existing?.persona ?? "You are a code reviewer reviewing this pull request.",
+  });
+}
+const CUSTOM_AGENT_NAMES = CUSTOM_AGENTS.map((d) => d.name).filter(
+  (n) => !AGENT_ORDER.includes(n as ReviewAgent)
+);
+
+function resolveAgents(): string[] {
+  const raw = AGENTS_RAW === "none" ? "" : AGENTS_RAW;
+  const available = [...AGENT_ORDER, ...CUSTOM_AGENT_NAMES];
+  const lowerMap = new Map(available.map((n) => [n.toLowerCase(), n]));
+
+  if (!raw) return CUSTOM_AGENT_NAMES; // ไม่ระบุ agents → รันเฉพาะ agent ใหม่จาก custom_agents (ถ้ามี)
+  if (raw === "all") return available;
+
+  const selected: string[] = [];
+  const unknown: string[] = [];
+  for (const name of raw.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const real = lowerMap.get(name);
+    if (real) {
+      if (!selected.includes(real)) selected.push(real);
+    } else {
+      unknown.push(name);
+    }
+  }
+  if (unknown.length) console.warn(`Unknown agents ignored: ${unknown.join(", ")}`);
+  return selected;
+}
+const AGENTS = resolveAgents();
+
+// --- Skills: โมดูลความรู้ที่แทรกเข้า system prompt ของทุก agent เมื่อเปิดใช้ ---
+interface SkillDef {
+  name: string;
+  description: string;
+  content: string;
+}
+
+const BUILT_IN_SKILLS: SkillDef[] = [
+  {
+    name: "security",
+    description: "OWASP-style security review of the changed code",
+    content:
+      "- Injection (SQL/NoSQL/command/template): flag string-concatenated queries and unescaped shell calls\n" +
+      "- XSS: unescaped user input rendered in HTML/templates\n" +
+      "- Auth: missing authorization checks on new endpoints; IDOR on user-scoped resources\n" +
+      "- Secrets: hardcoded keys/tokens/passwords, secrets logged or sent to the client\n" +
+      "- Validate input at trust boundaries; avoid unsafe deserialization and SSRF via user-controlled URLs",
+  },
+  {
+    name: "testing",
+    description: "Test coverage and test quality guidance",
+    content:
+      "- Identify behavior changed by this diff that lacks unit/integration coverage\n" +
+      "- Tests should cover the happy path, key edge cases (empty/null/boundary), and error paths\n" +
+      "- Flag tests that mock everything and assert nothing meaningful\n" +
+      "- Non-deterministic tests (time, random, network) should be controlled or faked",
+  },
+  {
+    name: "performance",
+    description: "Performance and resource usage review",
+    content:
+      "- N+1 queries: queries or async calls inside loops\n" +
+      "- Missing indexes for new query patterns; unbounded queries without LIMIT/pagination\n" +
+      "- O(n^2) patterns and large in-memory payloads on hot paths\n" +
+      "- Cache repeated expensive work; bound concurrency",
+  },
+  {
+    name: "clean-code",
+    description: "Readability and maintainability review",
+    content:
+      "- Names should reveal intent; flag abbreviations and misleading names\n" +
+      "- Functions should do one thing; flag long functions and deep nesting (suggest guard clauses)\n" +
+      "- DRY: duplicated logic to extract; dead code and commented-out blocks to remove\n" +
+      "- Magic numbers/strings should become named constants",
+  },
+  {
+    name: "error-handling",
+    description: "Error handling and resilience review",
+    content:
+      "- Catch errors and handle them with meaningful messages; no silent swallowing\n" +
+      "- External calls (HTTP/DB) need timeouts; retry with backoff where appropriate\n" +
+      "- Distinguish expected failures (validation) from unexpected ones (bugs)\n" +
+      "- Clean up resources on failure paths; keep error types consistent",
+  },
+  {
+    name: "api-contract",
+    description: "API design and backward compatibility review",
+    content:
+      "- REST conventions: resource naming, correct status codes, pagination\n" +
+      "- Breaking changes (removed/renamed fields and endpoints) must be flagged loudly\n" +
+      "- Validate request payloads; document new params/fields (e.g. OpenAPI) where applicable\n" +
+      "- Use versioning for incompatible changes",
+  },
+];
+
+const SKILLS_RAW = (process.env.INPUT_SKILLS ?? process.env.SKILLS ?? "").trim().toLowerCase();
+const CUSTOM_SKILLS_RAW = (process.env.INPUT_CUSTOM_SKILLS ?? process.env.CUSTOM_SKILLS ?? "").trim();
+const SKILLS_PATH = (process.env.INPUT_SKILLS_PATH ?? process.env.SKILLS_PATH ?? "").trim();
+
+interface CustomSkillEntry {
+  name?: unknown;
+  description?: unknown;
+  content?: unknown;
+}
+
+// custom_skills (JSON array) — name + content จำเป็น, description เป็นตัวเลือก
+function parseCustomSkills(raw: string): SkillDef[] {
+  const cleaned = raw.replace(/```(?:json)?/gi, "").trim();
+  if (!cleaned) return [];
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start === -1 || end <= start) {
+    console.warn("custom_skills: no JSON array found — ignored.");
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch (err) {
+    console.warn(`custom_skills: invalid JSON — ignored (${(err as Error).message}).`);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn("custom_skills: expected a JSON array — ignored.");
+    return [];
+  }
+  const defs: SkillDef[] = [];
+  for (const entry of parsed) {
+    const record = entry as CustomSkillEntry;
+    if (typeof record?.name !== "string" || !record.name.trim() || typeof record?.content !== "string" || !record.content.trim()) {
+      console.warn("custom_skills: entry needs 'name' and 'content' — skipped.");
+      continue;
+    }
+    defs.push({
+      name: record.name.trim(),
+      description: typeof record.description === "string" ? record.description.trim() : "",
+      content: record.content.trim(),
+    });
+  }
+  return defs;
+}
+
+// skills_path — import ไฟล์ *.md จากโฟลเดอร์ใน repo ทีละชุด (ชื่อ skill = ชื่อไฟล์,
+// ถ้าบรรทัดแรกเป็น heading # จะใช้เป็น description)
+function loadSkillsFromPath(dir: string): SkillDef[] {
+  if (!dir) return [];
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".md"));
+  } catch {
+    console.warn(`skills_path: cannot read directory '${dir}' — skipped.`);
+    return [];
+  }
+  const defs: SkillDef[] = [];
+  for (const file of files) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, file), "utf8").trim();
+      if (!raw) continue;
+      const lines = raw.split("\n");
+      const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
+      const description = heading ? heading[1].trim() : "";
+      const content = heading ? lines.slice(1).join("\n").trim() : raw;
+      defs.push({ name: file.replace(/\.md$/i, "").toLowerCase(), description, content });
+    } catch (err) {
+      console.warn(`skills_path: cannot read '${file}' — skipped (${(err as Error).message}).`);
+    }
+  }
+  if (defs.length) console.log(`skills_path: imported ${defs.length} skill(s) from ${dir}`);
+  return defs;
+}
+
+// registry: built-in + custom (JSON) + imported (folder) — ชื่อซ้ำ override ตัวเดิม
+const SKILL_REGISTRY = new Map<string, SkillDef>();
+for (const skill of BUILT_IN_SKILLS) SKILL_REGISTRY.set(skill.name, skill);
+for (const skill of parseCustomSkills(CUSTOM_SKILLS_RAW)) SKILL_REGISTRY.set(skill.name, skill);
+for (const skill of loadSkillsFromPath(SKILLS_PATH)) SKILL_REGISTRY.set(skill.name, skill);
+
+// เลือก skill ตามค่า input: "", "auto", "all" หรือรายชื่อคั่น comma
+function resolveSkillNames(files: GitHubFile[]): string[] {
+  if (!SKILLS_RAW) return [];
+  if (SKILLS_RAW === "all") return [...SKILL_REGISTRY.keys()];
+
+  if (SKILLS_RAW === "auto") {
+    // heuristics: เลือกตามเนื้อหาของ diff (ชื่อไฟล์ + patch)
+    const paths = files.map((f) => f.filename).join("\n").toLowerCase();
+    const text = files.map((f) => f.patch ?? "").join("\n").toLowerCase();
+    const picked = new Set<string>(["security", "clean-code", "error-handling", "testing"]);
+    if (/(select |insert |update |delete |sql|query|migration|schema|for\s*\(|while\s*\(|\.map\()/.test(text)) {
+      picked.add("performance");
+    }
+    if (/(route|controller|api|endpoint|openapi|swagger|handler)/.test(paths)) {
+      picked.add("api-contract");
+    }
+    return [...picked].filter((n) => SKILL_REGISTRY.has(n));
+  }
+
+  const lowerMap = new Map([...SKILL_REGISTRY.keys()].map((n) => [n.toLowerCase(), n]));
+  const selected: string[] = [];
+  const unknown: string[] = [];
+  for (const name of SKILLS_RAW.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const real = lowerMap.get(name);
+    if (real) {
+      if (!selected.includes(real)) selected.push(real);
+    } else {
+      unknown.push(name);
+    }
+  }
+  if (unknown.length) console.warn(`Unknown skills ignored: ${unknown.join(", ")}`);
+  return selected;
+}
+
+// แปลงรายชื่อ skill เป็นบล็อกข้อความที่จะแทรกต่อท้าย system prompt ของ agent
+function skillsBlock(skillNames: string[]): string {
+  const parts = skillNames
+    .map((n) => SKILL_REGISTRY.get(n))
+    .filter((s): s is SkillDef => !!s)
+    .map((s) => `### Skill: ${s.name}${s.description ? ` — ${s.description}` : ""}\n${s.content}`);
+  if (!parts.length) return "";
+  return `\n\n--- Skills (apply when relevant) ---\n${parts.join("\n\n")}`;
+}
+// ให้ agent ค้นหาข้อมูลจากเว็บเองได้ระหว่าง review (opt-in เพราะ provider ต้องรองรับ tools)
+const WEB_SEARCH = (process.env.INPUT_WEB_SEARCH ?? process.env.WEB_SEARCH ?? "false").toLowerCase() === "true";
+const MAX_SEARCH_ROUNDS = 3;
 
 const PROVIDER = (process.env.INPUT_PROVIDER ?? process.env.PROVIDER) as Provider | undefined;
 const API_TYPE: ApiType = resolveApiType(
@@ -58,6 +397,10 @@ interface OpenAIResponse {
   choices?: Array<{
     message: {
       content: string;
+      tool_calls?: Array<{
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
     };
     text?: string;
   }>;
@@ -140,10 +483,11 @@ interface CommitDetail {
   files?: Array<{ filename: string }>;
 }
 
-// รวมชื่อไฟล์ทั้งหมดจาก commits ของ PR ที่ author ตรงกับ username ที่ระบุ
-async function getFilenamesByCommitAuthor(username: string): Promise<Set<string>> {
-  const filenames = new Set<string>();
-  const target = username.toLowerCase();
+// รวม mapping ชื่อไฟล์ → ชุด commit authors ของ PR นี้
+// (ถ้าระบุ filterLogin จะดึงรายละเอียดเฉพาะ commits ของ user นั้นเพื่อประหยัด API calls)
+async function getFileAuthors(filterLogin?: string): Promise<Map<string, Set<string>>> {
+  const fileAuthors = new Map<string, Set<string>>();
+  const target = filterLogin?.toLowerCase();
   let page = 1;
 
   while (page <= 3) { // รองรับสูงสุด 300 commits
@@ -152,11 +496,13 @@ async function getFilenamesByCommitAuthor(username: string): Promise<Set<string>
     );
     if (status !== 200 || !Array.isArray(data)) {
       console.error(`GitHub commits API error: ${status} ${text.slice(0, 500)}`);
-      return filenames;
+      return fileAuthors;
     }
 
     for (const commit of data) {
-      if ((commit.author?.login ?? "").toLowerCase() !== target) continue;
+      const login = commit.author?.login;
+      if (!login) continue; // commit ที่ไม่ได้ผูกกับ GitHub account
+      if (target && login.toLowerCase() !== target) continue;
       const detail = await githubApiGet<CommitDetail>(
         `https://api.github.com/repos/${REPO}/commits/${commit.sha}`
       );
@@ -164,29 +510,58 @@ async function getFilenamesByCommitAuthor(username: string): Promise<Set<string>
         console.error(`Commit API error for ${commit.sha.slice(0, 7)}: ${detail.status}`);
         continue;
       }
-      for (const file of detail.data.files ?? []) filenames.add(file.filename);
+      for (const file of detail.data.files ?? []) {
+        const authors = fileAuthors.get(file.filename) ?? new Set<string>();
+        authors.add(login);
+        fileAuthors.set(file.filename, authors);
+      }
     }
 
     if (data.length < 100) break;
     page++;
   }
 
-  return filenames;
+  return fileAuthors;
 }
 
-async function filterFilesByUser(files: GitHubFile[]): Promise<GitHubFile[]> {
+function filterFilesByUser(files: GitHubFile[], fileAuthors: Map<string, Set<string>>): GitHubFile[] {
   if (USERNAME === "all") return files;
 
-  console.log(`Filtering changed files by commit author: ${USERNAME}`);
-  const filesByUser = await getFilenamesByCommitAuthor(USERNAME);
-  if (!filesByUser.size) {
+  if (!fileAuthors.size) {
     console.log(`No commits authored by '${USERNAME}' found in this PR.`);
     return [];
   }
 
-  const filtered = files.filter((f) => filesByUser.has(f.filename));
+  const filtered = files.filter((f) => {
+    const authors = [...(fileAuthors.get(f.filename) ?? [])];
+    return authors.some((a) => a.toLowerCase() === USERNAME);
+  });
   console.log(`${filtered.length} file(s) changed by '${USERNAME}': ${filtered.map((f) => f.filename).join(", ") || "(none)"}`);
   return filtered;
+}
+
+// สร้างบรรทัด scope พร้อม @mention:
+// - ระบุ user  → "Reviewing changes by @user"
+// - all        → "Reviewing changes by @a (file1, file2), @b (file3)" (tag เจ้าของ code เป็นรายคน)
+function buildScopeLine(files: GitHubFile[], fileAuthors: Map<string, Set<string>>): string {
+  if (USERNAME !== "all") return `Reviewing changes by @${USERNAME}\n\n`;
+
+  const byAuthor = new Map<string, string[]>();
+  for (const file of files) {
+    for (const author of fileAuthors.get(file.filename) ?? []) {
+      const list = byAuthor.get(author) ?? [];
+      list.push(file.filename);
+      byAuthor.set(author, list);
+    }
+  }
+  if (!byAuthor.size) return "";
+
+  const parts = [...byAuthor.entries()].map(([author, fileList]) => {
+    const shown = fileList.slice(0, 3).map((f) => `\`${f}\``).join(", ");
+    const more = fileList.length > 3 ? `, +${fileList.length - 3} more` : "";
+    return `@${author} (${shown}${more})`;
+  });
+  return `Reviewing changes by ${parts.join(", ")}\n\n`;
 }
 
 // รวม diff ของทุกไฟล์เป็นข้อความเดียว (โหมด comment รวมทั้ง PR)
@@ -204,6 +579,31 @@ function buildDiffText(files: GitHubFile[]): string {
   }
 
   return diffContent;
+}
+
+// นับบรรทัด +/- ของ diff (สำหรับเช็คขนาด PR ของ agent "author")
+function computeDiffStats(files: GitHubFile[]): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const file of files) {
+    for (const line of (file.patch ?? "").split("\n")) {
+      if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("\\")) continue;
+      if (line.startsWith("+")) added++;
+      else if (line.startsWith("-")) removed++;
+    }
+  }
+  return { added, removed };
+}
+
+// บรรทัดสรุปขนาด PR ตาม guideline 200–400 บรรทัด
+function prSizeLine(files: GitHubFile[]): string {
+  const { added, removed } = computeDiffStats(files);
+  const total = added + removed;
+  const verdict =
+    total > 400
+      ? " ⚠️ exceeds the 200–400 line guideline — consider splitting this PR"
+      : " ✅ within the 200–400 line guideline";
+  return `**PR size:** +${added} / -${removed} (${total} changed lines, ${files.length} files)${verdict}`;
 }
 
 // --- โหมด files_changed: review ทีละไฟล์แล้วโพสต์ inline comment บน diff ---
@@ -266,8 +666,29 @@ function parseInlineComments(raw: string): Array<{ line: number; comment: string
   return items;
 }
 
-async function reviewFilesInline(files: GitHubFile[]): Promise<void> {
+async function reviewFilesInline(files: GitHubFile[], scopeLine = "", skillSuffix = ""): Promise<void> {
   const inline: FileInlineComment[] = [];
+
+  // agent ที่จะรัน: ตาม input (built-in + custom) หรือโปรไฟล์เดี่ยวแบบเดิมเมื่อไม่ได้ระบุ
+  const reviewers: Array<{ label: string; system: string }> = [];
+  for (const name of AGENTS) {
+    const p = AGENT_REGISTRY.get(name);
+    if (!p) continue;
+    reviewers.push({
+      label: p.label,
+      system:
+        `${p.persona}${skillSuffix} ` +
+        `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`,
+    });
+  }
+  if (!reviewers.length) {
+    reviewers.push({
+      label: "",
+      system:
+        `You are an expert Code Reviewer. You review one changed file and leave short, precise inline comments.${skillSuffix} ` +
+        `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`,
+    });
+  }
 
   for (const file of files) {
     let patch = file.patch ?? "";
@@ -275,23 +696,27 @@ async function reviewFilesInline(files: GitHubFile[]): Promise<void> {
       patch = patch.slice(0, MAX_DIFF_CHARS) + "\n... (patch truncated)";
     }
 
-    const systemPrompt =
-      `You are an expert Code Reviewer. You review one changed file and leave short, precise inline comments. ` +
-      `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`;
     const userPrompt =
       `Review the diff below and list problems or improvements worth flagging.\n` +
       `Return a JSON array; each item must be {"line": <line number in the NEW version of the file>, "comment": "<concise review comment>"}.\n` +
       `Anchor each comment to the most relevant changed line. If nothing needs a comment, return [].\n\n` +
       `File: ${file.filename}\n${patch}`;
 
-    console.log(`Reviewing ${file.filename} (${patch.length} chars)...`);
-    const result = await askAI(systemPrompt, userPrompt);
-    const valid = commentableLines(patch);
+    for (const reviewer of reviewers) {
+      console.log(`Reviewing ${file.filename} (${patch.length} chars)${reviewer.label ? ` — ${reviewer.label}` : ""}...`);
+      const result = await askAI(reviewer.system, userPrompt);
+      const valid = commentableLines(patch);
 
-    for (const item of parseInlineComments(result)) {
-      const line = snapToNearestLine(item.line, valid);
-      if (line === null) continue;
-      inline.push({ path: file.filename, line, body: item.comment });
+      for (const item of parseInlineComments(result)) {
+        const line = snapToNearestLine(item.line, valid);
+        if (line === null) continue;
+        inline.push({
+          path: file.filename,
+          line,
+          body: reviewer.label ? `**${reviewer.label}:** ${item.comment}` : item.comment,
+        });
+        if (inline.length >= MAX_INLINE_COMMENTS) break;
+      }
       if (inline.length >= MAX_INLINE_COMMENTS) break;
     }
     if (inline.length >= MAX_INLINE_COMMENTS) {
@@ -305,16 +730,15 @@ async function reviewFilesInline(files: GitHubFile[]): Promise<void> {
     return;
   }
 
-  await postInlineReview(inline);
+  await postInlineReview(inline, scopeLine);
 }
 
 // สร้าง PR review พร้อม inline comments ผูกกับบรรทัดใน tab Files changed
-async function postInlineReview(comments: FileInlineComment[]): Promise<void> {
+async function postInlineReview(comments: FileInlineComment[], scopeLine = ""): Promise<void> {
   const url = `https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/reviews`;
   const provider = PROVIDER ?? "copilot";
-  const scope = USERNAME !== "all" ? ` — changes by @${USERNAME}` : "";
   const payload = JSON.stringify({
-    body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`${scope}\n\nReviewed changed files: ${comments.length} inline comment(s).`,
+    body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`\n\n${scopeLine}Reviewed changed files: ${comments.length} inline comment(s).`,
     event: "COMMENT",
     comments: comments.map((c) => ({ path: c.path, line: c.line, body: c.body })),
   });
@@ -340,7 +764,95 @@ async function postInlineReview(comments: FileInlineComment[]): Promise<void> {
   console.error(`Failed to post inline review: ${status} ${text.slice(0, 300)}`);
   console.log("Falling back to a single PR comment...");
   const fallback = comments.map((c) => `**\`${c.path}:${c.line}\`**\n\n${c.body}`).join("\n\n");
-  await postCommentToPr(fallback);
+  await postCommentToPr(fallback, scopeLine);
+}
+
+// --- Web search tool (ใช้เมื่อ web_search=true) ---
+
+const WEB_SEARCH_TOOL = {
+  type: "function",
+  function: {
+    name: "web_search",
+    description:
+      "Search the web for up-to-date information (docs, APIs, CVEs, best practices). Returns results with titles, URLs and snippets.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search query" } },
+      required: ["query"],
+    },
+  },
+};
+
+// ค้นหาผ่าน DuckDuckGo HTML endpoint (ไม่ต้องใช้ API key) — คืนผลลัพธ์แบบข้อความให้ model
+async function duckDuckGoSearch(query: string): Promise<string> {
+  const { status, text } = await fetchJson<unknown>(
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ai-code-review-action/1.0)",
+        Accept: "text/html",
+      },
+    }
+  );
+  if (status !== 200) return `(web search unavailable — HTTP ${status})`;
+
+  const decode = (s: string) =>
+    s
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#x27;|&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&#x2F;/g, "/");
+  const stripTags = (s: string) => decode(s.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+  const realUrl = (href: string) => {
+    const m = /[?&]uddg=([^&]+)/.exec(href);
+    return m ? decodeURIComponent(m[1]) : href;
+  };
+
+  const results: Array<{ title: string; url: string }> = [];
+  const snippets: string[] = [];
+  const linkRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snipRe = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(text)) && results.length < 5) {
+    results.push({ title: stripTags(m[2]), url: realUrl(decode(m[1])) });
+  }
+  while ((m = snipRe.exec(text)) && snippets.length < 5) snippets.push(stripTags(m[1]));
+
+  if (!results.length) return "(no results)";
+  return results
+    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${snippets[i] ? `\n   ${snippets[i]}` : ""}`)
+    .join("\n");
+}
+
+// ประมวลผล tool_calls ที่ได้จาก model — คืน messages ที่ต่อยอดแล้ว หรือ null ถ้าไม่มีการเรียก tool
+async function handleWebSearchToolCalls(
+  assistantMessage: { content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> },
+  messages: Array<Record<string, unknown>>
+): Promise<boolean> {
+  const calls = WEB_SEARCH ? assistantMessage.tool_calls ?? [] : [];
+  if (!calls.length) return false;
+
+  messages.push({ role: "assistant", content: assistantMessage.content ?? "", tool_calls: calls });
+  for (const call of calls) {
+    if (call.function?.name !== "web_search") {
+      messages.push({ role: "tool", tool_call_id: call.id, content: "unknown tool" });
+      continue;
+    }
+    let query = "";
+    try {
+      query = String(JSON.parse(call.function?.arguments ?? "{}").query ?? "");
+    } catch {
+      // arguments ไม่ใช่ JSON ที่ถูกต้อง — ใช้ข้อความดิบไป search เลย
+      query = call.function?.arguments ?? "";
+    }
+    console.log(`  🔎 agent web_search: ${query}`);
+    const result = await duckDuckGoSearch(query);
+    messages.push({ role: "tool", tool_call_id: call.id, content: result });
+  }
+  return true;
 }
 
 // 2. ส่งข้อมูลไปถาม AI
@@ -361,72 +873,148 @@ async function askAI(systemPrompt: string, userPrompt: string): Promise<string> 
   return askOpenAICompat(systemPrompt, userPrompt);
 }
 
+// พารามิเตอร์เสริมสำหรับโหมด thinking/effort — ส่งเฉพาะเมื่อผู้ใช้ระบุเท่านั้น
+// (ค่าเริ่มต้น mode=normal, effort="" จะไม่ส่งอะไรเพิ่ม จึงไม่กระทบการใช้งานเดิม)
+
+function isEffortValid(): boolean {
+  return !!EFFORT && VALID_EFFORTS.includes(EFFORT);
+}
+
+// OpenAI-compatible chat: enable_thinking (Qwen-style) + reasoning_effort (OpenAI o-series/GPT-5)
+function chatThinkingParams(): Record<string, unknown> {
+  const extras: Record<string, unknown> = {};
+  if (isEffortValid()) extras.reasoning_effort = EFFORT;
+  if (MODE === "thinking") extras.enable_thinking = true;
+  return extras;
+}
+
+// OpenAI Responses API: reasoning.effort
+function responsesThinkingParams(): Record<string, unknown> {
+  return isEffortValid() ? { reasoning: { effort: EFFORT } } : {};
+}
+
+// Anthropic Messages API: thinking ต้องมี budget_tokens และ max_tokens ต้องมากกว่า budget
+function anthropicThinkingParams(): Record<string, unknown> {
+  if (MODE !== "thinking") return {};
+  const budgetByEffort: Record<string, number> = { low: 1024, medium: 2048, high: 4096, max: 16384 };
+  let budget = (EFFORT && budgetByEffort[EFFORT]) || 1024;
+  if (budget >= MAX_TOKENS) {
+    budget = Math.max(1024, MAX_TOKENS - 1);
+  }
+  if (budget >= MAX_TOKENS) {
+    console.warn(`Cannot enable thinking: max_tokens (${MAX_TOKENS}) must be greater than the thinking budget (min 1024).`);
+    return {};
+  }
+  return { thinking: { type: "enabled", budget_tokens: budget } };
+}
+
 // 2b. GitHub Models — ใช้ @azure-rest/ai-inference SDK อย่างเป็นทางการ
 async function askGitHubModels(systemPrompt: string, userPrompt: string): Promise<string> {
   const endpoint = API_URL.replace(/\/chat\/completions\/?$/, "");
   const token = GH_PAT ?? API_KEY;
   const client = ModelClient(endpoint, new AzureKeyCredential(token));
 
-  const response = await client.path("/chat/completions").post({
-    body: {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
+  const messages: Array<Record<string, unknown>> = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ];
+
+  for (let round = 0; round <= MAX_SEARCH_ROUNDS; round++) {
+    const body: Record<string, unknown> = {
+      messages,
       model: MODEL,
       max_tokens: MAX_TOKENS,
-    },
-  });
+      ...chatThinkingParams(),
+    };
+    if (WEB_SEARCH) body.tools = [WEB_SEARCH_TOOL];
 
-  if (isUnexpected(response)) {
-    const errText = JSON.stringify(response.body.error ?? response.body);
-    console.error(`GitHub Models API error: ${response.status}`);
-    console.error(`Response: ${errText.slice(0, 500)}`);
-    return `⚠️ GitHub Models API returned status ${response.status}. Response: ${errText.slice(0, 200)}`;
+    // body มี fields แบบ dynamic (tools/thinking) จึงต้อง cast ให้ผ่าน type ของ SDK
+    const response = await client.path("/chat/completions").post({ body: body as never });
+
+    if (isUnexpected(response)) {
+      const errText = JSON.stringify(response.body.error ?? response.body);
+      console.error(`GitHub Models API error: ${response.status}`);
+      console.error(`Response: ${errText.slice(0, 500)}`);
+      return `⚠️ GitHub Models API returned status ${response.status}. Response: ${errText.slice(0, 200)}`;
+    }
+
+    const choice = (response.body as unknown as { choices?: Array<Record<string, unknown>> }).choices?.[0];
+    const msg = (choice?.message ?? {}) as {
+      content?: string;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+    };
+
+    if (await handleWebSearchToolCalls(msg, messages)) continue;
+    return msg.content ?? "";
   }
-
-  return response.body.choices?.[0]?.message?.content ?? "";
+  return "⚠️ Reached the web-search round limit without a final answer.";
 }
 
 async function askOpenAICompat(systemPrompt: string, userPrompt: string): Promise<string> {
   const isChat = API_TYPE !== "text";
 
-  const payload = isChat
-    ? JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-      })
-    : JSON.stringify({
-        model: MODEL,
-        prompt: `${systemPrompt}\n\n${userPrompt}`,
-        max_tokens: MAX_TOKENS,
-      });
+  const buildOptions = (payload: string): https.RequestOptions => {
+    const headers: Record<string, string | number> = {
+      Authorization: `Bearer ${API_KEY}`,
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload),
+      "User-Agent": "ai-code-review",
+    };
 
-  const headers: Record<string, string | number> = {
-    Authorization: `Bearer ${API_KEY}`,
-    "Content-Type": "application/json",
-    "Content-Length": Buffer.byteLength(payload),
-    "User-Agent": "ai-code-review",
+    // Azure uses api-key header instead of Bearer
+    if (isAzureProvider(PROVIDER, API_URL)) {
+      delete (headers as Record<string, unknown>)["Authorization"];
+      headers["api-key"] = API_KEY;
+    }
+
+    if (isCopilotUrl(API_URL)) {
+      headers["editor-version"] = "vscode/1.95.0";
+      headers["editor-plugin-version"] = "copilot-chat/0.22.0";
+      headers["openai-organization"] = "github-copilot";
+      headers["openai-intent"] = "copilot-ghost";
+    }
+
+    return { method: "POST", headers };
   };
 
-  // Azure uses api-key header instead of Bearer
-  if (isAzureProvider(PROVIDER, API_URL)) {
-    delete (headers as Record<string, unknown>)["Authorization"];
-    headers["api-key"] = API_KEY;
+  if (isChat) {
+    // web_search=true: วน function-calling loop — model เรียก web_search เราไปหาผลให้แล้วส่งกลับ
+    const messages: Array<Record<string, unknown>> = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ];
+
+    for (let round = 0; round <= MAX_SEARCH_ROUNDS; round++) {
+      const body: Record<string, unknown> = { model: MODEL, messages, ...chatThinkingParams() };
+      if (WEB_SEARCH) body.tools = [WEB_SEARCH_TOOL];
+      const payload = JSON.stringify(body);
+      const { status, data, text } = await fetchJson<OpenAIResponse>(API_URL, buildOptions(payload), payload);
+
+      if (status !== 200) {
+        console.error(`AI API error: ${status}`);
+        console.error(`Response: ${text.slice(0, 500)}`);
+        return `⚠️ AI API returned status ${status}. Response: ${text.slice(0, 200)}`;
+      }
+
+      if (!data.choices?.length) {
+        console.error(`Unexpected AI response: ${text.slice(0, 500)}`);
+        return `⚠️ Unexpected AI API response format: ${text.slice(0, 200)}`;
+      }
+
+      const msg = data.choices[0].message;
+      if (await handleWebSearchToolCalls(msg, messages)) continue;
+      return msg.content ?? "";
+    }
+    return "⚠️ Reached the web-search round limit without a final answer.";
   }
 
-  if (isCopilotUrl(API_URL)) {
-    headers["editor-version"] = "vscode/1.95.0";
-    headers["editor-plugin-version"] = "copilot-chat/0.22.0";
-    headers["openai-organization"] = "github-copilot";
-    headers["openai-intent"] = "copilot-ghost";
-  }
+  const payload = JSON.stringify({
+    model: MODEL,
+    prompt: `${systemPrompt}\n\n${userPrompt}`,
+    max_tokens: MAX_TOKENS,
+  });
 
-  const options: https.RequestOptions = { method: "POST", headers };
-  const { status, data, text } = await fetchJson<OpenAIResponse>(API_URL, options, payload);
+  const { status, data, text } = await fetchJson<OpenAIResponse>(API_URL, buildOptions(payload), payload);
 
   if (status !== 200) {
     console.error(`AI API error: ${status}`);
@@ -439,9 +1027,7 @@ async function askOpenAICompat(systemPrompt: string, userPrompt: string): Promis
     return `⚠️ Unexpected AI API response format: ${text.slice(0, 200)}`;
   }
 
-  return isChat
-    ? (data.choices[0].message?.content ?? "")
-    : (data.choices[0].text ?? "");
+  return data.choices[0].text ?? "";
 }
 
 async function askAnthropic(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -450,6 +1036,9 @@ async function askAnthropic(systemPrompt: string, userPrompt: string): Promise<s
     max_tokens: MAX_TOKENS,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
+    ...anthropicThinkingParams(),
+    // web_search=true: native server-side web search ของ Anthropic (model ค้นเอง)
+    ...(WEB_SEARCH ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }] } : {}),
   });
 
   const options: https.RequestOptions = {
@@ -471,13 +1060,13 @@ async function askAnthropic(systemPrompt: string, userPrompt: string): Promise<s
     return `⚠️ Anthropic API returned status ${status}. Response: ${text.slice(0, 200)}`;
   }
 
-  const textBlock = data.content?.find((c) => c.type === "text");
-  if (!textBlock) {
+  const textBlocks = (data.content ?? []).filter((c) => c.type === "text").map((c) => c.text);
+  if (!textBlocks.length) {
     console.error(`Unexpected Anthropic response: ${text.slice(0, 500)}`);
     return `⚠️ Unexpected Anthropic API response format: ${text.slice(0, 200)}`;
   }
 
-  return textBlock.text;
+  return textBlocks.join("\n\n");
 }
 
 async function askResponses(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -485,6 +1074,9 @@ async function askResponses(systemPrompt: string, userPrompt: string): Promise<s
     model: MODEL,
     instructions: systemPrompt,
     input: userPrompt,
+    ...responsesThinkingParams(),
+    // web_search=true: native web search tool ของ OpenAI Responses API
+    ...(WEB_SEARCH ? { tools: [{ type: "web_search" }] } : {}),
   });
 
   const options: https.RequestOptions = {
@@ -515,13 +1107,12 @@ async function askResponses(systemPrompt: string, userPrompt: string): Promise<s
   return textBlock.text;
 }
 
-// 3. โพสต์คำตอบกลับลงใน GitHub PR
-async function postCommentToPr(message: string): Promise<void> {
+// 3. โพสต์คำตอบกลับลงใน GitHub PR (scopeLine = บรรทัด @mention ผู้เกี่ยวข้อง)
+async function postCommentToPr(message: string, scopeLine = ""): Promise<void> {
   const url = `https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments`;
   const provider = PROVIDER ?? "copilot";
-  const scope = USERNAME !== "all" ? ` — changes by @${USERNAME}` : "";
   const payload = JSON.stringify({
-    body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`${scope}\n\n${message}`,
+    body: `## ${TITLE} — \`${MODEL}\` via \`${provider}\`\n\n${scopeLine}${message}`,
   });
 
   const options: https.RequestOptions = {
@@ -584,7 +1175,15 @@ async function main(): Promise<void> {
     API_KEY = await getCopilotToken(patForExchange);
   }
 
-  const files = await filterFilesByUser(await getPrFiles());
+  // mapping ไฟล์ → commit authors (โหมด all ต้องใช้ทั้งหมดเพื่อ tag รายคน,
+  // โหมดระบุ user ดึงเฉพาะ commits ของ user นั้น)
+  const fileAuthors = await getFileAuthors(USERNAME === "all" ? undefined : USERNAME);
+  const files = filterFilesByUser(await getPrFiles(), fileAuthors);
+
+  // เลือก skills ครั้งเดียวแล้วใช้กับทุก agent / ทุกโหมด
+  const skillNames = resolveSkillNames(files);
+  const skillSuffix = skillsBlock(skillNames);
+  console.log(`Skills: ${skillNames.join(", ") || "(none)"}`);
 
   if (FILES_CHANGED) {
     const reviewable = files.filter((f) => f.patch);
@@ -593,7 +1192,7 @@ async function main(): Promise<void> {
       return;
     }
     console.log(`files_changed mode: reviewing ${reviewable.length} changed file(s) inline...`);
-    await reviewFilesInline(reviewable);
+    await reviewFilesInline(reviewable, buildScopeLine(reviewable, fileAuthors), skillSuffix);
     console.log("Done!");
     return;
   }
@@ -602,16 +1201,48 @@ async function main(): Promise<void> {
 
   if (!diff) {
     console.log("No diff found or diff is too large.");
-  } else {
-    console.log(`Diff size: ${diff.length} chars. Sending to AI...`);
-    const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
-    const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}`;
-    const reviewResult = await askAI(systemPrompt, userPrompt);
+    return;
+  }
+
+  const scopeLine = buildScopeLine(files.filter((f) => f.patch), fileAuthors);
+
+  if (AGENTS.length) {
+    console.log(`Diff size: ${diff.length} chars. Multi-agent review: ${AGENTS.join(", ")}...`);
+    const sections: string[] = [];
+
+    for (const agent of AGENTS) {
+      const profile = AGENT_REGISTRY.get(agent);
+      if (!profile) continue;
+      console.log(`${profile.label} reviewing...`);
+      let agentUserPrompt = `Please review the following code diff and suggest improvements. Respond in ${LANGUAGE}.\n\n${diff}`;
+      if (agent === "author") {
+        agentUserPrompt = `This is your own code. Explain how it works (what each part does and why), self-review it, and point out any leftover debug code. Respond in ${LANGUAGE}.\n\n${diff}`;
+        const stats = computeDiffStats(files);
+        agentUserPrompt +=
+          `\n\nContext: PR size +${stats.added} / -${stats.removed} across ${files.length} files. ` +
+          `Guideline: keep PRs within 200–400 changed lines — if this exceeds the guideline, suggest how to split it.`;
+      }
+      const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
+
+      let section = `### ${profile.label}\n\n`;
+      if (agent === "author") section += `${prSizeLine(files)}\n\n`;
+      sections.push(section + (result.trim() || "No findings."));
+    }
 
     console.log("Posting comment to GitHub...");
-    await postCommentToPr(reviewResult);
+    await postCommentToPr(sections.join("\n\n"), scopeLine);
     console.log("Done!");
+    return;
   }
+
+  console.log(`Diff size: ${diff.length} chars. Sending to AI...`);
+  const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
+  const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}`;
+  const reviewResult = await askAI(systemPrompt + skillSuffix, userPrompt);
+
+  console.log("Posting comment to GitHub...");
+  await postCommentToPr(reviewResult, scopeLine);
+  console.log("Done!");
 }
 
 main().catch((err) => {

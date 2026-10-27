@@ -48,6 +48,50 @@ on:
         required: false
         default: ""
         type: string
+      mode:
+        description: "Model mode (thinking enables reasoning mode)"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - thinking
+      effort:
+        description: "Reasoning effort (none = don't send)"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - low
+          - medium
+          - high
+          - max
+      agents:
+        description: "Review agents: all, or comma-separated (author,primary,specialist,checklist + custom names), empty = custom only / single review"
+        required: false
+        default: "all"
+        type: string
+      custom_agents:
+        description: 'Custom agents as JSON array, e.g. [{"name":"db","label":"🗄️ DBA","persona":"You are a DBA..."}] — same name as built-in = override'
+        required: false
+        default: ""
+        type: string
+      skills:
+        description: "Skills for agents: auto, all, comma-separated names, or empty to disable"
+        required: false
+        default: "auto"
+        type: string
+      custom_skills:
+        description: 'Custom skills as JSON array [{"name":"...","description":"...","content":"..."}]'
+        required: false
+        default: ""
+        type: string
+      web_search:
+        description: "Let the AI search the web during review (model must support tools)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   pull-requests: write
@@ -85,6 +129,13 @@ jobs:
           api_key: ${{ inputs.api_key || secrets.GITHUB_TOKEN }}
           files_changed: ${{ inputs.files_changed }}
           username: ${{ inputs.username || github.actor }}
+          mode: ${{ inputs.mode || 'normal' }}
+          effort: ${{ inputs.effort != 'none' && inputs.effort || '' }}
+          agents: ${{ inputs.agents }}
+          custom_agents: ${{ inputs.custom_agents }}
+          skills: ${{ inputs.skills }}
+          custom_skills: ${{ inputs.custom_skills }}
+          web_search: ${{ inputs.web_search }}
           language: Thai
-          max_tokens: 2048
-          max_diff_chars: 10000
+          max_tokens: 128000
+          max_diff_chars: 1000000
