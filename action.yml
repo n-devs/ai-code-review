@@ -50,6 +50,10 @@ inputs:
     description: "Set to 'true' to have the AI review each changed file and post inline review comments on the diff (Files changed tab) instead of one combined PR comment"
     required: false
     default: "false"
+  max_comments:
+    description: "Max inline review comments (files_changed mode). 0 or empty (default) = no limit — posts every comment. When set to a number > 0, the quota is distributed round-robin across agents."
+    required: false
+    default: ""
   username:
     description: "GitHub username whose changes to review — only files changed in commits authored by this user are reviewed, and the user is @mentioned in the review comment. Use 'all' to review everyone — each author is then @mentioned with their files. Defaults to the user who triggered the workflow run (GITHUB_ACTOR)."
     required: false
@@ -63,7 +67,11 @@ inputs:
     required: false
     default: ""
   agents:
-    description: "Multi-agent review: 'all' or comma-separated list — built-ins: author, primary, specialist, checklist; plus any names defined in custom_agents. Empty = custom agents only (or single review if none)."
+    description: "Multi-agent review: 'all' or comma-separated list — built-ins: author, primary, specialist, checklist; plus any names from custom_agents/agents_path. Empty (default) = single combined agent."
+    required: false
+    default: ""
+  agents_path:
+    description: "Load/override agents from a folder of <agent-name>.md files in your repo (e.g. .github/agents). First line '# Label' is the display label; the rest is the persona. Same name overrides a built-in; new names add agents."
     required: false
     default: ""
   custom_agents:

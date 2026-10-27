@@ -43,6 +43,11 @@ on:
         required: false
         default: false
         type: boolean
+      max_comments:
+        description: "Max inline comments (0 = unlimited)"
+        required: false
+        default: 0
+        type: number
       username:
         description: "Review only changes by this GitHub username ('all' = everyone, empty = you)"
         required: false
@@ -68,9 +73,14 @@ on:
           - high
           - max
       agents:
-        description: "Review agents: all, or comma-separated (author,primary,specialist,checklist + custom names), empty = custom only / single review"
+        description: "Agents: empty = one combined agent; all or comma-separated (author,primary,specialist,checklist + custom) to split"
         required: false
-        default: "all"
+        default: ""
+        type: string
+      agents_path:
+        description: "Folder of <agent-name>.md files to load/override agents (e.g. .github/agents)"
+        required: false
+        default: ""
         type: string
       custom_agents:
         description: 'Custom agents as JSON array, e.g. [{"name":"db","label":"🗄️ DBA","persona":"You are a DBA..."}] — same name as built-in = override'
@@ -128,10 +138,12 @@ jobs:
           model: ${{ inputs.model }}
           api_key: ${{ inputs.api_key || secrets.GITHUB_TOKEN }}
           files_changed: ${{ inputs.files_changed }}
+          max_comments: ${{ inputs.max_comments || '0' }}
           username: ${{ inputs.username || github.actor }}
           mode: ${{ inputs.mode || 'normal' }}
           effort: ${{ inputs.effort != 'none' && inputs.effort || '' }}
           agents: ${{ inputs.agents }}
+          agents_path: ${{ inputs.agents_path }}
           custom_agents: ${{ inputs.custom_agents }}
           skills: ${{ inputs.skills }}
           custom_skills: ${{ inputs.custom_skills }}

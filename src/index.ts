@@ -24,7 +24,9 @@ const MAX_TOKENS = parseInt(process.env.INPUT_MAX_TOKENS ?? process.env.MAX_TOKE
 const LANGUAGE = process.env.INPUT_LANGUAGE ?? process.env.LANGUAGE ?? "English";
 const TITLE = process.env.INPUT_TITLE ?? process.env.TITLE ?? "AI Code Review";
 const FILES_CHANGED = (process.env.INPUT_FILES_CHANGED ?? process.env.FILES_CHANGED ?? "false").toLowerCase() === "true";
-const MAX_INLINE_COMMENTS = 20;
+// 0 หรือค่าว่าง (default) = ไม่จำกัดจำนวน inline comments — ตั้งเลข > 0 เพื่อกลับมามีโควตา
+const MAX_INLINE_COMMENTS =
+  parseInt(process.env.INPUT_MAX_COMMENTS ?? process.env.MAX_COMMENTS ?? "0", 10) || 0;
 // agent รันพร้อมกัน (concurrent) — จำกัดจำนวน AI call พร้อมกันกันโดน rate limit
 const MAX_CONCURRENT_AI_CALLS = 5;
 
@@ -54,52 +56,42 @@ if (EFFORT && !VALID_EFFORTS.includes(EFFORT)) {
 }
 
 // Multi-agent review: author (self-review) / primary (peer) / specialist (tech lead + security/DBA)
+// นิยาม agent อยู่ในไฟล์ agents/<agent name>.md — บรรทัดแรก '# ชื่อที่แสดง' ที่เหลือคือ persona
 type ReviewAgent = "author" | "primary" | "specialist" | "checklist";
 const AGENT_ORDER: ReviewAgent[] = ["author", "primary", "specialist", "checklist"];
-const AGENT_PROFILES: Record<ReviewAgent, { label: string; persona: string }> = {
-  author: {
-    label: "🧑‍💻 Author (Self-Review)",
-    persona:
-      "You are the Author of this change reviewing your own code before opening the pull request. " +
-      "Explain how your code works: walk through the changed code and describe what each part does and why. " +
-      "While explaining, self-review honestly and flag any leftover debug code or temporary artifacts " +
-      "you should remove before asking teammates to review.",
-  },
-  primary: {
-    label: "🔍 Primary Reviewer",
-    persona:
-      "You are the Primary Reviewer, a peer developer on the same team. " +
-      "Check business logic and correctness, edge cases, error handling, and readability. " +
-      "Verify whether unit/integration tests cover the real behavior — call out missing tests explicitly.",
-  },
-  specialist: {
-    label: "🛡️ Specialist Reviewer",
-    persona:
-      "You are a Senior Specialist Reviewer (Tech Lead with Security and DBA expertise) holding final approval " +
-      "authority for core/production systems. Check system architecture, scalability, and overall impact; " +
-      "look for security vulnerabilities (injection, auth, secrets, unsafe input handling) " +
-      "and database performance issues in critical paths.",
-  },
-  checklist: {
-    label: "📋 Code Review Checklist",
-    persona:
-      "You are a systematic Checklist Reviewer. Go through the standard code review checklist below, one item at a time, " +
-      "and give each item a status — ✅ pass, ⚠️ needs attention, ❌ fail, or ➖ not applicable — with a short note.\n" +
-      "Checklist:\n" +
-      "1. Correctness — logic matches the intent of the change\n" +
-      "2. Naming and readability\n" +
-      "3. Error handling — errors caught with meaningful messages\n" +
-      "4. Edge cases — null/empty/boundary/large inputs\n" +
-      "5. Security — input validation, injection, secrets, auth\n" +
-      "6. Performance — N+1 queries, unnecessary loops, memory\n" +
-      "7. Tests — unit/integration coverage for the changed behavior\n" +
-      "8. Documentation/comments updated where needed\n" +
-      "9. No leftover debug code or TODO markers\n" +
-      "10. Backward compatibility — breaking changes flagged\n" +
-      "11. Dependencies — no unnecessary new deps, versions pinned\n" +
-      "12. Logging — appropriate level, no sensitive data logged",
-  },
-};
+
+// โฟลเดอร์ built-in agents อยู่ข้าง dist (agents/ ที่ root ของ action repo)
+const BUILT_IN_AGENTS_DIR = path.join(__dirname, "..", "agents");
+const AGENTS_PATH_INPUT = (process.env.INPUT_AGENTS_PATH ?? "").trim();
+
+function loadAgentFiles(dir: string): Map<string, { label: string; persona: string }> {
+  const agents = new Map<string, { label: string; persona: string }>();
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".md"));
+  } catch {
+    return agents;
+  }
+  for (const file of files) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, file), "utf8").trim();
+      if (!raw) continue;
+      const lines = raw.split("\n");
+      const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
+      const label = heading ? heading[1].trim() : file.replace(/\.md$/i, "");
+      const persona = heading ? lines.slice(1).join("\n").trim() : raw;
+      agents.set(file.replace(/\.md$/i, "").toLowerCase(), { label, persona });
+    } catch (err) {
+      console.warn(`agents: cannot read '${file}' — skipped (${(err as Error).message}).`);
+    }
+  }
+  return agents;
+}
+
+// คำสั่ง format ตาราง checklist (ใช้ในโหมดรายงาน — ไม่ใส่ใน persona เพราะโหมด inline ต้องการ JSON)
+const CHECKLIST_TABLE_INSTRUCTION =
+  " Present the checklist result as a markdown table with columns | # | Item | Status | Note | " +
+  "(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Structure the report with a clear section per responsibility.";
 const AGENTS_RAW = (process.env.INPUT_AGENTS ?? process.env.AGENTS ?? "").trim().toLowerCase();
 
 // --- Custom agents: override built-in หรือเพิ่ม agent ใหม่ผ่าน JSON array ---
@@ -148,10 +140,18 @@ function parseCustomAgents(raw: string): Array<{ name: string; label?: string; p
 
 const CUSTOM_AGENTS = parseCustomAgents(process.env.INPUT_CUSTOM_AGENTS ?? process.env.CUSTOM_AGENTS ?? "");
 
-// registry รวม built-in + custom (ชื่อซ้ำกับ built-in = override)
-const AGENT_REGISTRY = new Map<string, { label: string; persona: string }>(
-  AGENT_ORDER.map((a) => [a as string, AGENT_PROFILES[a]])
-);
+// registry: built-in จาก agents/ ข้าง dist → agents_path ของ repo ผู้ใช้ → custom_agents (JSON)
+// (ชื่อซ้ำ = override ตัวเดิม)
+const AGENT_REGISTRY = new Map<string, { label: string; persona: string }>();
+for (const [name, profile] of loadAgentFiles(BUILT_IN_AGENTS_DIR)) AGENT_REGISTRY.set(name, profile);
+if (!AGENT_REGISTRY.size) {
+  console.warn(`No agent files found in ${BUILT_IN_AGENTS_DIR} — only the combined single review will work.`);
+}
+if (AGENTS_PATH_INPUT) {
+  const fromPath = loadAgentFiles(AGENTS_PATH_INPUT);
+  for (const [name, profile] of fromPath) AGENT_REGISTRY.set(name, profile);
+  console.log(`agents_path: loaded ${fromPath.size} agent file(s) from ${AGENTS_PATH_INPUT}`);
+}
 for (const def of CUSTOM_AGENTS) {
   const existing = AGENT_REGISTRY.get(def.name);
   AGENT_REGISTRY.set(def.name, {
@@ -159,13 +159,17 @@ for (const def of CUSTOM_AGENTS) {
     persona: def.persona ?? existing?.persona ?? "You are a code reviewer reviewing this pull request.",
   });
 }
-const CUSTOM_AGENT_NAMES = CUSTOM_AGENTS.map((d) => d.name).filter(
-  (n) => !AGENT_ORDER.includes(n as ReviewAgent)
+// agent รวม (default โหมดเดียว) — ไม่นับเป็น custom ที่เลือกผ่าน agents ได้
+const COMBINED_PERSONA =
+  AGENT_REGISTRY.get("combined")?.persona ??
+  "You are an expert Code Reviewer combining the author, primary reviewer, and specialist perspectives.";
+const CUSTOM_AGENT_NAMES = [...AGENT_REGISTRY.keys()].filter(
+  (n) => !AGENT_ORDER.includes(n as ReviewAgent) && n !== "combined"
 );
 
 function resolveAgents(): string[] {
   const raw = AGENTS_RAW === "none" ? "" : AGENTS_RAW;
-  const available = [...AGENT_ORDER, ...CUSTOM_AGENT_NAMES];
+  const available = [...AGENT_ORDER.filter((a) => AGENT_REGISTRY.has(a)), ...CUSTOM_AGENT_NAMES];
   const lowerMap = new Map(available.map((n) => [n.toLowerCase(), n]));
 
   if (!raw) return CUSTOM_AGENT_NAMES; // ไม่ระบุ agents → รันเฉพาะ agent ใหม่จาก custom_agents (ถ้ามี)
@@ -733,6 +737,37 @@ function addresseePrompt(files: GitHubFile[], fileAuthors: Map<string, Set<strin
   );
 }
 
+interface CollectedComment {
+  fi: number;
+  ri: number;
+  line: number;
+  comment: FileInlineComment;
+}
+
+// แจกโควตาแบบ round-robin ต่อ agent — ให้ทุก agent มีส่วนแสดง (เรียงภายใน agent ตาม ไฟล์ → บรรทัด)
+function collectWithQuota(collected: CollectedComment[], max: number): FileInlineComment[] {
+  const byAgent = new Map<number, CollectedComment[]>();
+  for (const c of collected) {
+    const list = byAgent.get(c.ri) ?? [];
+    list.push(c);
+    byAgent.set(c.ri, list);
+  }
+  const agentOrder = [...byAgent.keys()].sort((x, y) => x - y);
+  const result: FileInlineComment[] = [];
+  while (result.length < max) {
+    let added = false;
+    for (const ri of agentOrder) {
+      const item = byAgent.get(ri)!.shift();
+      if (!item) continue;
+      result.push(item.comment);
+      added = true;
+      if (result.length >= max) break;
+    }
+    if (!added) break; // ครบทุก agent แล้ว
+  }
+  return result;
+}
+
 async function reviewFilesInline(
   files: GitHubFile[],
   scopeLine = "",
@@ -750,9 +785,7 @@ async function reviewFilesInline(
           console.log(`${profile.label} summarizing to conversation...`);
           try {
             const userPrompt =
-              `Run your code review checklist against the diff below. Present the result as a markdown table ` +
-              `with columns | # | Item | Status | Note | — one row per checklist item ` +
-              `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}` +
+              `Run your code review checklist against the diff below.${CHECKLIST_TABLE_INSTRUCTION} Respond in ${LANGUAGE}.\n\n${diff}` +
               addresseePrompt(files, fileAuthors);
             const result = await askAI(profile.persona + skillSuffix, userPrompt);
             checklistSection =
@@ -781,7 +814,8 @@ async function reviewFilesInline(
     reviewers.push({
       label: "",
       system:
-        `You are an expert Code Reviewer. You review one changed file and leave short, precise inline comments.${skillSuffix} ` +
+        `${COMBINED_PERSONA} ` +
+        `You review one changed file and leave short, precise inline comments.${skillSuffix} ` +
         `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`,
     });
   }
@@ -791,13 +825,7 @@ async function reviewFilesInline(
   const fileIndex = new Map<GitHubFile, number>();
   files.forEach((f, i) => fileIndex.set(f, i));
 
-  interface Collected {
-    fi: number;
-    ri: number;
-    line: number;
-    comment: FileInlineComment;
-  }
-  const collected: Collected[] = [];
+  const collected: CollectedComment[] = [];
 
   const jobs: Array<() => Promise<void>> = [];
   for (const file of files) {
@@ -861,13 +889,18 @@ async function reviewFilesInline(
   await runWithConcurrency(jobs, MAX_CONCURRENT_AI_CALLS);
   if (checklistPromise) await checklistPromise;
 
-  // จัดลำดับให้เหมือนการรันแบบลำดับ (ไฟล์ → agent → บรรทัด) แล้วค่อยตัดตามโควตา
+  // จัดลำดับให้ deterministic (ไฟล์ → agent → บรรทัด) แล้วเลือกตามโหมดโควตา:
+  // - ไม่กำหนดโควตา (default) → โพสต์ทั้งหมด
+  // - กำหนดโควตา → แจกแบบ round-robin ต่อ agent ให้ทุกตัวมีส่วนแสดง
   collected.sort((a, b) => a.fi - b.fi || a.ri - b.ri || a.line - b.line);
-  const inline = collected.slice(0, MAX_INLINE_COMMENTS).map((c) => c.comment);
-  if (collected.length > MAX_INLINE_COMMENTS) {
+  const inline: FileInlineComment[] =
+    MAX_INLINE_COMMENTS > 0 ? collectWithQuota(collected, MAX_INLINE_COMMENTS) : collected.map((c) => c.comment);
+  if (MAX_INLINE_COMMENTS > 0 && collected.length > inline.length) {
     console.log(
-      `Collected ${collected.length} inline comments — capped to ${MAX_INLINE_COMMENTS} (ordered by file/agent/line).`
+      `Collected ${collected.length} inline comments — capped to ${MAX_INLINE_COMMENTS} (round-robin per agent).`
     );
+  } else {
+    console.log(`Collected ${inline.length} inline comment(s)${MAX_INLINE_COMMENTS > 0 ? "" : " — no cap"}.`);
   }
 
   if (!inline.length) {
@@ -1400,9 +1433,7 @@ async function main(): Promise<void> {
           if (agent === "checklist") {
             // สั่ง format ตรงนี้แทนใน persona — เพราะโหมด inline ต้องการ JSON (สั่งซ้อนใน persona จะชนกันแล้ว parser อ่านไม่ออก)
             agentUserPrompt =
-              `Run your code review checklist against the diff below. Present the result as a markdown table ` +
-              `with columns | # | Item | Status | Note | — one row per checklist item ` +
-              `(✅ pass, ⚠️ needs attention, ❌ fail, ➖ not applicable). Respond in ${LANGUAGE}.\n\n${diff}`;
+              `Run your code review checklist against the diff below.${CHECKLIST_TABLE_INSTRUCTION} Respond in ${LANGUAGE}.\n\n${diff}`;
           }
           agentUserPrompt += addressee;
           const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
@@ -1429,10 +1460,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.log(`Diff size: ${diff.length} chars. Sending to AI...`);
-  const systemPrompt = `You are an expert Code Reviewer. Review the code and respond in ${LANGUAGE}.`;
+  console.log(`Diff size: ${diff.length} chars. Sending to AI (combined agent)...`);
   const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}${addressee}`;
-  const reviewResult = await askAI(systemPrompt + skillSuffix, userPrompt);
+  const reviewResult = await askAI(COMBINED_PERSONA + CHECKLIST_TABLE_INSTRUCTION + skillSuffix, userPrompt);
 
   console.log("Posting comment to GitHub...");
   await postCommentToPr(ownerGreet + closeUnbalancedFence(reviewResult), scopeLine);

@@ -177,7 +177,22 @@ Each `*.md` file in the folder becomes a skill named after the file (an optional
 
 ## Multi-Agent Review
 
-Set `agents: all` (or a comma-separated subset) to run the review as four AI agents with different roles. Each agent reviews independently and its findings are posted in its own section (or prefixed inline comments in `files_changed` mode).
+By default the review runs as **one combined agent** — a single AI call whose persona merges all four responsibilities (author self-review + explanation, primary logic/edge-case/test checks, specialist security/architecture/DB checks, and a closing checklist table).
+
+Agent definitions live in markdown files — one per agent — in the action's [`agents/`](agents/) folder:
+
+```
+agents/
+├── author.md      # 🧑‍💻 Author (Self-Review)
+├── primary.md     # 🔍 Primary Reviewer
+├── specialist.md  # 🛡️ Specialist Reviewer
+├── checklist.md   # 📋 Code Review Checklist
+└── combined.md    # 🤖 default single agent (all four roles)
+```
+
+Each file's first line `# Label` is the display name; the rest is the agent persona. To customize, fork the action and edit these files — or keep your own folder in your repo and point `agents_path` at it (e.g. `agents_path: .github/agents`). Same file name overrides a built-in; a new file name adds a new agent you can select in `agents`.
+
+Set `agents: all` (or a comma-separated subset) to run the agents **in parallel** — each posts its own section (or prefixed inline comments in `files_changed` mode). Use this when you want deeper, role-focused passes and don't mind the extra AI calls.
 
 | Agent | Role | Focus |
 |---|---|---|
@@ -261,10 +276,12 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 | `max_diff_chars` | | `10000` | Maximum characters of diff sent to AI |
 | `language` | | `English` | Language for the review response |
 | `files_changed` | | `false` | `true` = AI reviews each changed file and posts inline review comments on the diff (Files changed tab) instead of one combined PR comment |
+| `max_comments` | | unlimited | Max inline review comments (`files_changed` mode) — `0`/empty = no limit and every comment is posted; set a number to cap with round-robin distribution across agents |
 | `username` | | run actor | GitHub username whose changes to review — only files changed in commits authored by this user. Agents talk to the owner directly: every inline comment starts with the owner's username as a clickable profile link (no mention noise), and the review summary carries the real @mention |
 | `mode` | | `normal` | `thinking` = enable thinking/reasoning mode where supported (`enable_thinking` for OpenAI-compatible chat, `thinking` block for Anthropic messages). `normal` sends nothing extra |
 | `effort` | | — | Reasoning effort: `low`, `medium`, `high`, `max` — adds `reasoning_effort` (chat), `reasoning.effort` (responses), or maps to the thinking budget (messages). Empty or `none` sends nothing |
-| `agents` | | — | Multi-agent review: `all` or comma-separated (see [Multi-Agent Review](#multi-agent-review)). Empty = custom agents only, or single review if none |
+| `agents` | | — | Empty (default) = **one combined agent** covering all four roles in a single AI call. Set `all` or a comma-separated list to split the work into separate agents (see [Multi-Agent Review](#multi-agent-review)) |
+| `agents_path` | | — | Load/override agents from a folder of `<agent-name>.md` files in your repo (e.g. `.github/agents`) |
 | `custom_agents` | | — | JSON array to override built-in agents or add new ones (see [Custom Agents](#custom-agents)) |
 | `skills` | | — | Skills injected into every agent's prompt: `auto`, `all`, comma-separated names, or empty (see [Skills](#skills)) |
 | `custom_skills` | | — | Add your own skills as a JSON array (see [Skills](#skills)) |
