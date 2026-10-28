@@ -106,7 +106,7 @@ jobs:
       - name: Move major version tag to this release
         run: |
           set -euo pipefail
-          MAJOR="${VERSION%%.*}"
+          MAJOR="v${VERSION%%.*}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -f "$MAJOR" HEAD
