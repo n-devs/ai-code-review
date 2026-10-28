@@ -1,6 +1,6 @@
 {
   "name": "ai-code-review",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "AI-powered PR code review using GitHub Copilot",
   "main": "dist/index.js",
   "scripts": {
