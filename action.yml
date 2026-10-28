@@ -98,6 +98,10 @@ inputs:
     description: "Folder (in the repo) holding memory files: context.md (stable base) and <date>-context.md (daily memory)."
     required: false
     default: ".github/ai-review"
+  memory_branch:
+    description: "Branch to save memory files to. Empty (default) = the repository's default branch. The branch must already exist; otherwise saving is skipped with a warning."
+    required: false
+    default: ""
   memory_files:
     description: "Which dated memory files to load: a number = latest N files (e.g. 3), specific dates comma-separated (e.g. 2026-10-25,2026-10-28), or a date range (e.g. 2026-10-20..2026-10-28)."
     required: false

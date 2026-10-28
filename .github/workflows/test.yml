@@ -143,6 +143,11 @@ on:
         required: false
         default: ".github/ai-review"
         type: string
+      memory_branch:
+        description: "Branch to save memory to (empty = default branch; must already exist)"
+        required: false
+        default: ""
+        type: string
       memory_files:
         description: "Memory to load: N latest (3), dates (2026-10-25,2026-10-28), or range (2026-10-20..2026-10-28)"
         required: false
@@ -201,4 +206,5 @@ jobs:
           web_search: ${{ inputs.web_search }}
           memory: ${{ inputs.memory }}
           context_path: ${{ inputs.context_path }}
+          memory_branch: ${{ inputs.memory_branch }}
           memory_files: ${{ inputs.memory_files }}

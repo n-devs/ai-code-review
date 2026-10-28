@@ -324,6 +324,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 | `web_search` | | `false` | `true` = let the AI search the web during review (native tool for Anthropic messages / OpenAI responses; function-calling loop via DuckDuckGo for chat / GitHub Models — model must support tools) |
 | `memory` | | `false` | `true` = enable review memory: loads `context.md` + latest `<date>-context.md` files and the bot's previous comments on the PR (no repeat reports), then saves an AI-generated memory file for today back to the repo (needs `contents: write`) |
 | `context_path` | | `.github/ai-review` | Folder holding `context.md` (stable base) and `<date>-context.md` daily memory files |
+| `memory_branch` | | default branch | Branch to save memory files to (must already exist; saving is skipped with a warning if not found) |
 | `memory_files` | | `3` | Which dated memory files to load: a number = latest N, specific dates (`2026-10-25,2026-10-28`), or a range (`2026-10-20..2026-10-28`) |
 
 ## Providers

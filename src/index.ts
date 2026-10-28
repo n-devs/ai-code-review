@@ -470,6 +470,8 @@ function fetchJson<T>(
 // และหลังจบ run ให้ AI สร้างความจำใหม่บันทึกเป็นไฟล์ประจำวันกลับเข้า repo ---
 const MEMORY = (process.env.INPUT_MEMORY ?? process.env.MEMORY ?? "false").toLowerCase() === "true";
 const CONTEXT_PATH = (process.env.INPUT_CONTEXT_PATH ?? ".github/ai-review").trim().replace(/\/+$/, "");
+// branch ปลายทางของการบันทึกความจำ — ว่าง = default branch ของ repo
+const MEMORY_BRANCH = (process.env.INPUT_MEMORY_BRANCH ?? process.env.MEMORY_BRANCH ?? "").trim();
 // ความจำที่จะโหลด: จำนวนไฟล์ล่าสุด ("3") | รายวันที่ ("2026-10-25,2026-10-28") | ช่วงวันที่ ("2026-10-20..2026-10-28")
 const MEMORY_FILES_SPEC = (process.env.INPUT_MEMORY_FILES ?? process.env.MEMORY_FILES ?? "3").trim();
 
@@ -599,7 +601,22 @@ async function saveMemory(reviewText: string): Promise<void> {
 
     const today = new Date().toISOString().slice(0, 10);
     const filePath = `${CONTEXT_PATH}/${today}-context.md`;
-    const getUrl = `https://api.github.com/repos/${REPO}/contents/${encodeURIComponent(filePath)}`;
+
+    // ถ้าระบุ memory_branch ให้ตรวจก่อนว่า branch มีจริง (ไม่มี = ข้ามการบันทึกอย่างสง่างาม)
+    // และต้องอ่านไฟล์เดิน/commit จาก branch เดียวกัน ไม่งั้น sha จะไม่ตรงกัน
+    let refQuery = "";
+    if (MEMORY_BRANCH) {
+      const branchCheck = await githubApiGet<unknown>(
+        `https://api.github.com/repos/${REPO}/branches/${encodeURIComponent(MEMORY_BRANCH)}`
+      );
+      if (branchCheck.status !== 200) {
+        console.warn(`Memory: branch '${MEMORY_BRANCH}' not found — saving skipped.`);
+        return;
+      }
+      refQuery = `?ref=${encodeURIComponent(MEMORY_BRANCH)}`;
+    }
+
+    const getUrl = `https://api.github.com/repos/${REPO}/contents/${encodeURIComponent(filePath)}${refQuery}`;
     const existing = await githubApiGet<{ sha?: string; content?: string }>(getUrl);
 
     let content = `# AI Review Memory — ${today}\n`;
@@ -617,6 +634,7 @@ async function saveMemory(reviewText: string): Promise<void> {
       message: `chore(ai-review): memory update ${today} [skip ci]`,
       content: Buffer.from(content).toString("base64"),
       sha,
+      ...(MEMORY_BRANCH ? { branch: MEMORY_BRANCH } : {}),
     });
     const { status, text } = await fetchJson<unknown>(
       `https://api.github.com/repos/${REPO}/contents/${encodeURIComponent(filePath)}`,
