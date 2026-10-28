@@ -90,6 +90,18 @@ inputs:
     description: "Import skills from a folder of markdown files in the repo (e.g. .github/ai-skills). Each *.md file becomes a skill named after the file; an optional first-line '# Title' is its description."
     required: false
     default: ""
+  memory:
+    description: "Set to 'true' to enable review memory: loads context.md + the latest <date>-context.md files from context_path and the bot's previous comments on the PR (no repeat reports), then after the run saves a new AI-generated memory file <today>-context.md back to the repo (requires contents: write permission)."
+    required: false
+    default: "false"
+  context_path:
+    description: "Folder (in the repo) holding memory files: context.md (stable base) and <date>-context.md (daily memory)."
+    required: false
+    default: ".github/ai-review"
+  memory_files:
+    description: "Which dated memory files to load: a number = latest N files (e.g. 3), specific dates comma-separated (e.g. 2026-10-25,2026-10-28), or a date range (e.g. 2026-10-20..2026-10-28)."
+    required: false
+    default: "3"
   web_search:
     description: "Set to 'true' to let the AI search the web during review. Uses native web search for Anthropic messages / OpenAI responses, and a web_search function-calling loop (DuckDuckGo, no key needed) for chat/GitHub Models. Requires a model/provider that supports tools."
     required: false

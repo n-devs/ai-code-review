@@ -141,6 +141,41 @@ To make the workflow **manual-only** (no automatic run when a PR is created), re
 
 > ⚠️ **Security note:** GitHub has no secret/password input type for `workflow_dispatch` — the form field is plain text, and a manually entered key stays visible in the run's event payload. The `::add-mask::` step above masks the key as `***` in the run logs (it reads the key from `$GITHUB_EVENT_PATH` at runtime, because values passed via `env:` are printed in the step's log header before masking takes effect). Prefer leaving `api_key` empty (falls back to `GITHUB_TOKEN`) or wiring it to a repository secret (e.g. `secrets.OPENAI_API_KEY`) instead of pasting a raw key.
 
+## Memory
+
+Set `memory: true` so the AI **doesn't start from scratch every run**. Two layers:
+
+**1. Dated memory files** (`context_path`, default `.github/ai-review/`)
+
+Both file types use a **fixed schema** (stable headings — content is free-form):
+
+`context.md` — stable base knowledge (human-edited), always loaded:
+
+```markdown
+# AI Review Context
+## Architecture      # how the codebase is built
+## Skip Review       # files/patterns not to review (generated output, lockfiles, ...)
+## Conventions       # team rules the review should apply
+## Known Issues      # accepted issues — do not re-report
+```
+
+`<date>-context.md` — daily memory written by the AI after each run. Every run appends a section with the exact same structure (enforced by code — missing sections become `- none`):
+
+```markdown
+# AI Review Memory — 2026-10-28
+## Run 2026-10-28 06:17 UTC — PR #5
+### Patterns        # recurring issues/patterns observed
+### Decisions       # conventions/decisions applied or agreed
+### Follow-ups      # open items to check next time
+### Fixed           # previously reported items this diff resolves
+```
+
+- **Before reviewing**: `context.md` + the latest `<date>-context.md` files are injected into every agent's prompt as prior knowledge ("don't re-report known/accepted issues").
+- **After each run**: the AI summarizes what's worth remembering (recurring patterns, decisions, follow-ups) and the action commits it into **today's** `<date>-context.md` (multiple runs the same day append sections). Commits carry `[skip ci]`.
+- Requires `contents: write` permission in the calling workflow; if the save fails (e.g. read-only token), the review still completes — memory saving is best-effort.
+
+**2. Previous feedback on the PR** — the bot's own earlier comments are loaded so it doesn't re-report the same issues; fixed items get a short ✅ acknowledgment instead.
+
 ## Skills
 
 Skills are knowledge modules injected into **every agent's** system prompt when enabled — each one focuses the review on a specific area.
@@ -287,6 +322,9 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 | `custom_skills` | | — | Add your own skills as a JSON array (see [Skills](#skills)) |
 | `skills_path` | | — | Import skills from a folder of `*.md` files in the repo, e.g. `.github/ai-skills` |
 | `web_search` | | `false` | `true` = let the AI search the web during review (native tool for Anthropic messages / OpenAI responses; function-calling loop via DuckDuckGo for chat / GitHub Models — model must support tools) |
+| `memory` | | `false` | `true` = enable review memory: loads `context.md` + latest `<date>-context.md` files and the bot's previous comments on the PR (no repeat reports), then saves an AI-generated memory file for today back to the repo (needs `contents: write`) |
+| `context_path` | | `.github/ai-review` | Folder holding `context.md` (stable base) and `<date>-context.md` daily memory files |
+| `memory_files` | | `3` | Which dated memory files to load: a number = latest N, specific dates (`2026-10-25,2026-10-28`), or a range (`2026-10-20..2026-10-28`) |
 
 ## Providers
 

@@ -133,10 +133,25 @@ on:
         required: false
         default: false
         type: boolean
+      memory:
+        description: "Review memory: load dated context files + previous feedback, save new memory after run"
+        required: false
+        default: true
+        type: boolean
+      context_path:
+        description: "Folder for memory files (<date>-context.md)"
+        required: false
+        default: ".github/ai-review"
+        type: string
+      memory_files:
+        description: "Memory to load: N latest (3), dates (2026-10-25,2026-10-28), or range (2026-10-20..2026-10-28)"
+        required: false
+        default: "3"
+        type: string
 
 permissions:
   pull-requests: write
-  contents: read
+  contents: write
   models: read
 
 jobs:
@@ -184,3 +199,6 @@ jobs:
           custom_skills: ${{ inputs.custom_skills }}
           skills_path: ${{ inputs.skills_path }}
           web_search: ${{ inputs.web_search }}
+          memory: ${{ inputs.memory }}
+          context_path: ${{ inputs.context_path }}
+          memory_files: ${{ inputs.memory_files }}

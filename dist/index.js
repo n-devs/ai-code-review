@@ -2700,6 +2700,166 @@ function fetchJson(url, options, body) {
         req.end();
     });
 }
+// --- Memory: ความจำระหว่าง run — อ่าน <date>-context.md ล่าสุด + จำ comment เก่าของ bot,
+// และหลังจบ run ให้ AI สร้างความจำใหม่บันทึกเป็นไฟล์ประจำวันกลับเข้า repo ---
+const MEMORY = (process.env.INPUT_MEMORY ?? process.env.MEMORY ?? "false").toLowerCase() === "true";
+const CONTEXT_PATH = (process.env.INPUT_CONTEXT_PATH ?? ".github/ai-review").trim().replace(/\/+$/, "");
+// ความจำที่จะโหลด: จำนวนไฟล์ล่าสุด ("3") | รายวันที่ ("2026-10-25,2026-10-28") | ช่วงวันที่ ("2026-10-20..2026-10-28")
+const MEMORY_FILES_SPEC = (process.env.INPUT_MEMORY_FILES ?? process.env.MEMORY_FILES ?? "3").trim();
+// เลือกวันที่ของความจำตาม spec: จำนวนล่าสุด / รายวันที่ / ช่วงวันที่
+// availableDates = วันที่ทั้งหมดที่มีไฟล์จริง (จากชื่อไฟล์) — คืนแบบเรียงใหม่สุดก่อน
+function resolveMemoryDates(availableDates) {
+    const desc = [...availableDates].sort().reverse();
+    if (/^\d+$/.test(MEMORY_FILES_SPEC)) {
+        return desc.slice(0, parseInt(MEMORY_FILES_SPEC, 10));
+    }
+    const range = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(MEMORY_FILES_SPEC);
+    if (range) {
+        return desc.filter((d) => d >= range[1] && d <= range[2]);
+    }
+    const wanted = MEMORY_FILES_SPEC
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s));
+    if (!wanted.length) {
+        console.warn(`memory_files '${MEMORY_FILES_SPEC}' ไม่ถูกต้อง — ใช้ 3 ไฟล์ล่าสุดแทน (รูปแบบ: จำนวน | วันที่คั่น comma | วันที่..วันที่)`);
+        return desc.slice(0, 3);
+    }
+    const missing = wanted.filter((d) => !availableDates.includes(d));
+    if (missing.length)
+        console.warn(`memory_files: ไม่มีไฟล์ความจำของวันที่ ${missing.join(", ")}`);
+    // เรียงใหม่สุดก่อนตามแบบเดียวกัน
+    return wanted.filter((d) => availableDates.includes(d)).sort().reverse();
+}
+// โหลดความจำจากโฟลเดอร์ใน checkout: context.md (ฐาน, ถ้ามี) + <date>-context.md ตามที่ spec เลือก
+function loadMemoryFiles() {
+    if (!MEMORY)
+        return "";
+    const dir = path.resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), CONTEXT_PATH);
+    let files;
+    try {
+        files = fs.readdirSync(dir);
+    }
+    catch {
+        return ""; // ยังไม่มีโฟลเดอร์ความจำ (run แรก ๆ)
+    }
+    const parts = [];
+    const base = files.find((f) => f.toLowerCase() === "context.md");
+    if (base) {
+        try {
+            const content = fs.readFileSync(path.join(dir, base), "utf8").trim();
+            if (content)
+                parts.push(`### Base context (${base})\n${content}`);
+        }
+        catch { /* ข้ามไฟล์ที่อ่านไม่ได้ */ }
+    }
+    const availableDates = files
+        .filter((f) => /^\d{4}-\d{2}-\d{2}-context\.md$/i.test(f))
+        .map((f) => f.replace(/-context\.md$/i, ""));
+    const dated = resolveMemoryDates(availableDates).map((d) => `${d}-context.md`);
+    for (const f of dated) {
+        try {
+            const content = fs.readFileSync(path.join(dir, f), "utf8").trim();
+            if (content)
+                parts.push(`### Memory ${f.replace(/-context\.md$/i, "")}\n${content}`);
+        }
+        catch { /* ข้าม */ }
+    }
+    console.log(`Memory: loaded ${dated.length} dated file(s)${base ? " + base context" : ""} from ${CONTEXT_PATH}`);
+    if (!parts.length)
+        return "";
+    return `\n\n--- Memory from previous runs (use this prior knowledge; do not re-report known/accepted issues) ---\n${parts.join("\n\n")}`;
+}
+// ดึง comment ก่อนหน้าของ bot เองใน PR นี้ — กันรายงานซ้ำ + เช็คว่าอะไรแก้แล้ว
+async function loadPreviousFeedback() {
+    if (!MEMORY)
+        return "";
+    const { status, data, text } = await githubApiGet(`https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=30`);
+    if (status !== 200 || !Array.isArray(data)) {
+        console.warn(`Memory: cannot load previous comments (${status}) ${text.slice(0, 120)}`);
+        return "";
+    }
+    const own = data
+        .filter((c) => typeof c.body === "string" && c.body.startsWith(`## ${TITLE}`))
+        .slice(-2) // เอา 2 comment ล่าสุดพอ กัน prompt บวม
+        .map((c) => c.body.slice(0, 2500));
+    if (!own.length)
+        return "";
+    console.log(`Memory: ${own.length} previous review comment(s) on this PR`);
+    return (`\n\n--- Already reported in previous runs on this PR ---\n` +
+        `Do NOT re-report these unless they are still unresolved — if the current diff fixes any of them, ` +
+        `acknowledge it briefly (e.g. "✅ fixed"); only flag items that remain.\n\n${own.join("\n\n---\n\n")}`);
+}
+// บังคับโครงสร้างความจำรายวันให้ตายตัว — ทุก run ต้องมีครบ 4 หัวนี้ตามลำดับ (หัวไหน AI ไม่ให้ = - none)
+function normalizeMemorySection(raw) {
+    const headings = ["Patterns", "Decisions", "Follow-ups", "Fixed"];
+    return headings
+        .map((name) => {
+        const re = new RegExp(`###\\s+${name}\\s*\\n([\\s\\S]*?)(?=###\\s|$)`, "i");
+        const m = re.exec(raw);
+        const body = m ? m[1].trim() : "";
+        return `### ${name}\n${body || "- none"}`;
+    })
+        .join("\n\n");
+}
+// หลังจบ review: ให้ AI สรุปสิ่งที่ควรจำ → บันทึกเป็น <วันนี้>-context.md กลับเข้า repo ผ่าน Contents API
+async function saveMemory(reviewText) {
+    if (!MEMORY)
+        return;
+    try {
+        const systemPrompt = "You maintain a code-review team's memory log. Summarize this review run using EXACTLY this fixed structure " +
+            "(markdown bullets, max 5 bullets per section):\n" +
+            "### Patterns\n- recurring issues or patterns in the codebase\n" +
+            "### Decisions\n- conventions or decisions applied/agreed\n" +
+            "### Follow-ups\n- open items to check next time\n" +
+            "### Fixed\n- previously reported items that this diff resolves\n" +
+            "Respond ONLY with those four sections — never add other headings.";
+        const userPrompt = `Summarize memory-worthy knowledge from this review (PR #${PR_NUMBER}, repo ${REPO}):\n\n` +
+            `--- Review output ---\n${reviewText.slice(0, 6000)}`;
+        const summary = (await askAI(systemPrompt, userPrompt)).trim();
+        if (!summary || summary.startsWith("⚠️")) {
+            console.warn("Memory: AI summary unavailable — skipping save.");
+            return;
+        }
+        const today = new Date().toISOString().slice(0, 10);
+        const filePath = `${CONTEXT_PATH}/${today}-context.md`;
+        const getUrl = `https://api.github.com/repos/${REPO}/contents/${encodeURIComponent(filePath)}`;
+        const existing = await githubApiGet(getUrl);
+        let content = `# AI Review Memory — ${today}\n`;
+        let sha;
+        if (existing.status === 200 && existing.data.sha && typeof existing.data.content === "string") {
+            sha = existing.data.sha;
+            const prev = Buffer.from(existing.data.content, "base64").toString("utf8");
+            content = prev.trimEnd() + "\n\n";
+        }
+        const runAt = new Date().toISOString().replace("T", " ").slice(0, 16);
+        content += `## Run ${runAt} UTC — PR #${PR_NUMBER}\n${normalizeMemorySection(summary)}\n`;
+        const payload = JSON.stringify({
+            message: `chore(ai-review): memory update ${today} [skip ci]`,
+            content: Buffer.from(content).toString("base64"),
+            sha,
+        });
+        const { status, text } = await fetchJson(`https://api.github.com/repos/${REPO}/contents/${encodeURIComponent(filePath)}`, {
+            method: "PUT",
+            headers: {
+                Authorization: `token ${GH_PAT}`,
+                Accept: "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload),
+                "User-Agent": "ai-code-review",
+            },
+        }, payload);
+        if (status >= 200 && status < 300) {
+            console.log(`Memory: saved to ${filePath}${sha ? " (updated today's file)" : ""}.`);
+        }
+        else {
+            console.warn(`Memory: save failed (${status}) ${text.slice(0, 200)}`);
+        }
+    }
+    catch (err) {
+        console.warn(`Memory: save skipped — ${err.message}`);
+    }
+}
 // --- Reliability: retry สำหรับ 429/5xx (rate limit / ฝั่ง server ล่มชั่วคราว) ---
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // AI ที่เปิด thinking อาจตอบช้า จึงให้เวลา 5 นาที
 const MAX_RETRIES = 3;
@@ -3000,7 +3160,7 @@ function collectWithQuota(collected, max) {
     }
     return result;
 }
-async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAuthors = new Map()) {
+async function reviewFilesInline(files, scopeLine = "", promptExtras = "", fileAuthors = new Map()) {
     // 📋 Checklist ไม่ทำ inline — สรุปตารางลง review summary (Conversation) และเริ่มรันขนานไปเลย
     let checklistSection = "";
     const checklistPromise = AGENTS.includes("checklist") && AGENT_REGISTRY.get("checklist")
@@ -3013,7 +3173,7 @@ async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAu
             try {
                 const userPrompt = `Run your code review checklist against the diff below.${CHECKLIST_TABLE_INSTRUCTION} Respond in ${LANGUAGE}.\n\n${diff}` +
                     addresseePrompt(files, fileAuthors);
-                const result = await askAI(profile.persona + skillSuffix, userPrompt);
+                const result = await askAI(profile.persona + promptExtras, userPrompt);
                 checklistSection =
                     `### ${profile.label}\n\n${ownerGreeting(files, fileAuthors)}` +
                         (closeUnbalancedFence(result.trim()) || "No findings.");
@@ -3032,7 +3192,7 @@ async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAu
             continue;
         reviewers.push({
             label: p.label,
-            system: `${p.persona}${skillSuffix} ` +
+            system: `${p.persona}${promptExtras} ` +
                 `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`,
         });
     }
@@ -3040,7 +3200,7 @@ async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAu
         reviewers.push({
             label: "",
             system: `${COMBINED_PERSONA} ` +
-                `You review one changed file and leave short, precise inline comments.${skillSuffix} ` +
+                `You review one changed file and leave short, precise inline comments.${promptExtras} ` +
                 `Respond ONLY with a JSON array (no markdown fences, no extra text). Write comments in ${LANGUAGE}.`,
         });
     }
@@ -3121,6 +3281,7 @@ async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAu
             // ไม่มี inline comment แต่ checklist มีผล — โพสต์เป็น comment ลง Conversation เลย
             console.log("No inline comments — posting checklist summary as a PR comment...");
             await postCommentToPr(checklistSection, scopeLine);
+            await saveMemory(checklistSection);
         }
         else {
             console.log("AI left no inline comments.");
@@ -3128,6 +3289,7 @@ async function reviewFilesInline(files, scopeLine = "", skillSuffix = "", fileAu
         return;
     }
     await postInlineReview(inline, scopeLine, checklistSection);
+    await saveMemory(`${checklistSection}\n\nInline comments:\n${inline.map((c) => `- ${c.path}:${c.line} ${c.body}`).join("\n")}`);
 }
 // สร้าง PR review พร้อม inline comments ผูกกับบรรทัดใน tab Files changed
 // (checklistSection = สรุปตาราง checklist ที่จะแนบลง review body ใน tab Conversation)
@@ -3554,6 +3716,9 @@ async function main() {
     const skillNames = resolveSkillNames(files);
     const skillSuffix = skillsBlock(skillNames);
     console.log(`Skills: ${skillNames.join(", ") || "(none)"}`);
+    // ความจำ: ไฟล์ <date>-context.md ล่าสุด + comment เก่าของ bot ใน PR นี้
+    const memorySuffix = MEMORY ? loadMemoryFiles() + (await loadPreviousFeedback()) : "";
+    const promptExtras = skillSuffix + memorySuffix;
     if (FILES_CHANGED) {
         const reviewable = files.filter((f) => f.patch);
         if (!reviewable.length) {
@@ -3561,7 +3726,7 @@ async function main() {
             return;
         }
         console.log(`files_changed mode: reviewing ${reviewable.length} changed file(s) inline...`);
-        await reviewFilesInline(reviewable, buildScopeLine(reviewable, fileAuthors), skillSuffix, fileAuthors);
+        await reviewFilesInline(reviewable, buildScopeLine(reviewable, fileAuthors), promptExtras, fileAuthors);
         console.log("Done!");
         return;
     }
@@ -3596,7 +3761,7 @@ async function main() {
                         `Run your code review checklist against the diff below.${CHECKLIST_TABLE_INSTRUCTION} Respond in ${LANGUAGE}.\n\n${diff}`;
                 }
                 agentUserPrompt += addressee;
-                const result = await askAI(profile.persona + skillSuffix, agentUserPrompt);
+                const result = await askAI(profile.persona + promptExtras, agentUserPrompt);
                 return { agent, profile, text: closeUnbalancedFence(result.trim()) };
             }
             catch (err) {
@@ -3616,14 +3781,16 @@ async function main() {
         }
         console.log("Posting comment to GitHub...");
         await postCommentToPr(sections.join("\n\n"), scopeLine);
+        await saveMemory(sections.join("\n\n"));
         console.log("Done!");
         return;
     }
     console.log(`Diff size: ${diff.length} chars. Sending to AI (combined agent)...`);
     const userPrompt = `Please review the following code diff and suggest improvements. Also point out any security vulnerabilities if present. Respond in ${LANGUAGE}.\n\n${diff}${addressee}`;
-    const reviewResult = await askAI(COMBINED_PERSONA + CHECKLIST_TABLE_INSTRUCTION + skillSuffix, userPrompt);
+    const reviewResult = await askAI(COMBINED_PERSONA + CHECKLIST_TABLE_INSTRUCTION + promptExtras, userPrompt);
     console.log("Posting comment to GitHub...");
     await postCommentToPr(ownerGreet + closeUnbalancedFence(reviewResult), scopeLine);
+    await saveMemory(reviewResult);
     console.log("Done!");
 }
 main().catch((err) => {
