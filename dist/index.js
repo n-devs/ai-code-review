@@ -2691,10 +2691,37 @@ function fetchJson(url, options, body) {
             });
         });
         req.on("error", reject);
+        // ตัดการเชื่อมต่อที่ค้างนาน (idle timeout) กัน job ค้างจนหมด 6 ชม.ของ runner
+        if (options.timeout) {
+            req.setTimeout(options.timeout, () => req.destroy(new Error(`Request timed out after ${options.timeout}ms: ${url}`)));
+        }
         if (body)
             req.write(body);
         req.end();
     });
+}
+// --- Reliability: retry สำหรับ 429/5xx (rate limit / ฝั่ง server ล่มชั่วคราว) ---
+const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // AI ที่เปิด thinking อาจตอบช้า จึงให้เวลา 5 นาที
+const MAX_RETRIES = 3;
+const RETRY_DELAYS_MS = [2000, 5000, 10000];
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function isRetryableStatus(status) {
+    return status === 429 || (status >= 500 && status <= 599);
+}
+// fetchJson + timeout + retry — ใช้กับการเรียกที่ retry ได้ (AI, GET ต่าง ๆ)
+// ไม่ใช้กับการโพสต์ comment/review เพื่อกันโพสต์ซ้ำ
+async function fetchJsonRetry(url, options, body) {
+    let result;
+    for (let attempt = 0;; attempt++) {
+        result = await fetchJson(url, { ...options, timeout: REQUEST_TIMEOUT_MS }, body);
+        if (!isRetryableStatus(result.status) || attempt >= MAX_RETRIES)
+            return result;
+        const delay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+        console.warn(`HTTP ${result.status} from ${url} — retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        await sleep(delay);
+    }
 }
 function githubApiGet(url) {
     const options = {
@@ -2705,20 +2732,28 @@ function githubApiGet(url) {
             "User-Agent": "ai-code-review",
         },
     };
-    return fetchJson(url, options);
+    return fetchJsonRetry(url, options);
 }
-// 1. ดึงไฟล์ที่ถูกเปลี่ยนแปลง (Diff) จาก GitHub API
+// 1. ดึงไฟล์ที่ถูกเปลี่ยนแปลง (Diff) จาก GitHub API — แบ่งหน้า 100/หน้า รองรับถึง 3000 ไฟล์
 async function getPrFiles() {
-    const { status, data, text } = await githubApiGet(`https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files`);
-    if (status !== 200) {
-        console.error(`GitHub API error: ${status} ${text.slice(0, 500)}`);
-        return [];
+    const all = [];
+    let page = 1;
+    while (page <= 30) {
+        const { status, data, text } = await githubApiGet(`https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100&page=${page}`);
+        if (status !== 200) {
+            console.error(`GitHub API error: ${status} ${text.slice(0, 500)}`);
+            break;
+        }
+        if (!Array.isArray(data)) {
+            console.error(`Unexpected GitHub API response: ${text.slice(0, 500)}`);
+            break;
+        }
+        all.push(...data);
+        if (data.length < 100)
+            break;
+        page++;
     }
-    if (!Array.isArray(data)) {
-        console.error(`Unexpected GitHub API response: ${text.slice(0, 500)}`);
-        return [];
-    }
-    return data;
+    return all;
 }
 // รวม mapping ชื่อไฟล์ → ชุด commit authors ของ PR นี้
 // (ถ้าระบุ filterLogin จะดึงรายละเอียดเฉพาะ commits ของ user นั้นเพื่อประหยัด API calls)
@@ -3158,7 +3193,7 @@ const WEB_SEARCH_TOOL = {
 };
 // ค้นหาผ่าน DuckDuckGo HTML endpoint (ไม่ต้องใช้ API key) — คืนผลลัพธ์แบบข้อความให้ model
 async function duckDuckGoSearch(query) {
-    const { status, text } = await fetchJson(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    const { status, text } = await fetchJsonRetry(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
         method: "GET",
         headers: {
             "User-Agent": "Mozilla/5.0 (compatible; ai-code-review-action/1.0)",
@@ -3289,7 +3324,17 @@ async function askGitHubModels(systemPrompt, userPrompt) {
         if (WEB_SEARCH)
             body.tools = [WEB_SEARCH_TOOL];
         // body มี fields แบบ dynamic (tools/thinking) จึงต้อง cast ให้ผ่าน type ของ SDK
-        const response = await client.path("/chat/completions").post({ body: body });
+        // พร้อม retry เมื่อโดน 429/5xx
+        const post = () => client.path("/chat/completions").post({ body: body });
+        let response = await post();
+        let attempt = 0;
+        while (isRetryableStatus(Number(response.status)) && attempt < MAX_RETRIES) {
+            const delay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+            console.warn(`GitHub Models HTTP ${response.status} — retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+            await sleep(delay);
+            response = await post();
+            attempt++;
+        }
         if ((0, ai_inference_1.isUnexpected)(response)) {
             const errText = JSON.stringify(response.body.error ?? response.body);
             console.error(`GitHub Models API error: ${response.status}`);
@@ -3337,7 +3382,7 @@ async function askOpenAICompat(systemPrompt, userPrompt) {
             if (WEB_SEARCH)
                 body.tools = [WEB_SEARCH_TOOL];
             const payload = JSON.stringify(body);
-            const { status, data, text } = await fetchJson(API_URL, buildOptions(payload), payload);
+            const { status, data, text } = await fetchJsonRetry(API_URL, buildOptions(payload), payload);
             if (status !== 200) {
                 console.error(`AI API error: ${status}`);
                 console.error(`Response: ${text.slice(0, 500)}`);
@@ -3359,7 +3404,7 @@ async function askOpenAICompat(systemPrompt, userPrompt) {
         prompt: `${systemPrompt}\n\n${userPrompt}`,
         max_tokens: MAX_TOKENS,
     });
-    const { status, data, text } = await fetchJson(API_URL, buildOptions(payload), payload);
+    const { status, data, text } = await fetchJsonRetry(API_URL, buildOptions(payload), payload);
     if (status !== 200) {
         console.error(`AI API error: ${status}`);
         console.error(`Response: ${text.slice(0, 500)}`);
@@ -3391,7 +3436,7 @@ async function askAnthropic(systemPrompt, userPrompt) {
             "User-Agent": "ai-code-review",
         },
     };
-    const { status, data, text } = await fetchJson(API_URL, options, payload);
+    const { status, data, text } = await fetchJsonRetry(API_URL, options, payload);
     if (status !== 200) {
         console.error(`Anthropic API error: ${status}`);
         console.error(`Response: ${text.slice(0, 500)}`);
@@ -3422,7 +3467,7 @@ async function askResponses(systemPrompt, userPrompt) {
             "User-Agent": "ai-code-review",
         },
     };
-    const { status, data, text } = await fetchJson(API_URL, options, payload);
+    const { status, data, text } = await fetchJsonRetry(API_URL, options, payload);
     if (status !== 200) {
         console.error(`Responses API error: ${status}`);
         console.error(`Response: ${text.slice(0, 500)}`);
@@ -3472,7 +3517,7 @@ async function getCopilotToken(ghPat) {
             "User-Agent": "ai-code-review",
         },
     };
-    const { status, data, text } = await fetchJson(url, options);
+    const { status, data, text } = await fetchJsonRetry(url, options);
     if (status !== 200 || !data.token) {
         throw new Error(`Failed to get Copilot token: ${status} ${text.slice(0, 200)}`);
     }
@@ -3482,6 +3527,10 @@ async function getCopilotToken(ghPat) {
 async function main() {
     if (!GH_PAT || !PR_NUMBER || !REPO) {
         console.error("Missing required environment variables. Set GH_PAT, PR_NUMBER, REPO.");
+        process.exit(1);
+    }
+    if (!/^\d+$/.test(PR_NUMBER)) {
+        console.error(`Invalid pr_number '${PR_NUMBER}' — must be a numeric PR number.`);
         process.exit(1);
     }
     console.log("Fetching PR diff...");

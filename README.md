@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: n-devs/ai-code-review@v2
+      - uses: n-devs/ai-code-review@v3
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
@@ -121,7 +121,7 @@ jobs:
             echo "::add-mask::$key"
           fi
       - uses: actions/checkout@v4
-      - uses: n-devs/ai-code-review@v2
+      - uses: n-devs/ai-code-review@v3
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
@@ -202,7 +202,7 @@ Set `agents: all` (or a comma-separated subset) to run the agents **in parallel*
 | `checklist` | 📋 Code Review Checklist | Walks through a standard 12-item review checklist (correctness, readability, error handling, edge cases, security, performance, tests, docs, debug leftovers, compatibility, dependencies, logging) and reports ✅/⚠️/❌ per item as a table. In `files_changed` mode it summarizes as a table in the Conversation tab instead of inline comments |
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -219,7 +219,7 @@ Set `agents: all` (or a comma-separated subset) to run the agents **in parallel*
 Use `custom_agents` (a JSON array) to **override a built-in agent** or **add your own agent**:
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -332,7 +332,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### GitHub Models (default — zero config)
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -343,7 +343,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### GitHub Models (current endpoint, publisher-prefixed model)
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -358,7 +358,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 > Requires a personal PAT with Copilot subscription stored as `COPILOT_PAT` secret.
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -371,7 +371,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### OpenAI GPT-4o
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -384,7 +384,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Anthropic Claude
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -398,7 +398,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Google Gemini
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -411,7 +411,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### xAI Grok
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -424,7 +424,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Qwen Cloud (OpenAI-compatible)
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -437,7 +437,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Qwen Cloud (Anthropic-compatible, token-plan)
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -451,7 +451,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### OpenRouter
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -464,7 +464,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Ollama (self-hosted)
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -478,7 +478,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Azure OpenAI
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -492,7 +492,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### OpenAI Responses API
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -506,7 +506,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Custom Provider
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -520,7 +520,7 @@ Set `web_search: true` to let **every agent** look things up on the web while re
 ### Review in Thai
 
 ```yaml
-- uses: n-devs/ai-code-review@v2
+- uses: n-devs/ai-code-review@v3
   with:
     gh_pat: ${{ secrets.GITHUB_TOKEN }}
     repo: ${{ github.repository }}
@@ -548,4 +548,4 @@ What the deploy does:
 1. Validates the version format and the existence of `docs/release/v<version>.md`
 2. Rebuilds `dist/` and fails if the committed `dist/` is out of date with `src/`
 3. Creates the `v<version>` tag and a GitHub Release whose body is the release notes file
-4. Moves the major version tag (e.g. `v2`) to this release, so `n-devs/ai-code-review@v2` users get the update
+4. Moves the major version tag (e.g. `v2`) to this release, so `n-devs/ai-code-review@v3` users get the update

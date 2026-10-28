@@ -29,10 +29,36 @@ on:
           - aws
           - custom
       model:
-        description: "AI model name (e.g. gpt-4o, openai/gpt-4o-mini, claude-3-5-sonnet-20241022)"
+        description: "AI model name (e.g. gpt-4o, qwen-plus, claude-3-5-sonnet-20241022)"
         required: false
         default: "gpt-4o"
         type: string
+      api_type:
+        description: "API type (auto = let provider decide)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - chat
+          - messages
+          - responses
+          - text
+      language:
+        description: "Review language (e.g. Thai, English)"
+        required: false
+        default: "Thai"
+        type: string
+      max_tokens:
+        description: "Max output tokens for the AI response"
+        required: false
+        default: 128000
+        type: number
+      max_diff_chars:
+        description: "Max diff characters sent to the AI"
+        required: false
+        default: 1000000
+        type: number
       api_key:
         description: "AI API key (leave empty to use GITHUB_TOKEN)"
         required: false
@@ -43,6 +69,11 @@ on:
         required: false
         default: false
         type: boolean
+      skills_path:
+        description: "Folder of *.md skill files to import (e.g. .github/ai-skills)"
+        required: false
+        default: ""
+        type: string
       max_comments:
         description: "Max inline comments (0 = unlimited)"
         required: false
@@ -136,6 +167,10 @@ jobs:
           pr_number: ${{ inputs.pr_number }}
           provider: ${{ inputs.provider }}
           model: ${{ inputs.model }}
+          api_type: ${{ inputs.api_type != 'auto' && inputs.api_type || '' }}
+          language: ${{ inputs.language || 'Thai' }}
+          max_tokens: ${{ inputs.max_tokens || '128000' }}
+          max_diff_chars: ${{ inputs.max_diff_chars || '1000000' }}
           api_key: ${{ inputs.api_key || secrets.GITHUB_TOKEN }}
           files_changed: ${{ inputs.files_changed }}
           max_comments: ${{ inputs.max_comments || '0' }}
@@ -147,7 +182,5 @@ jobs:
           custom_agents: ${{ inputs.custom_agents }}
           skills: ${{ inputs.skills }}
           custom_skills: ${{ inputs.custom_skills }}
+          skills_path: ${{ inputs.skills_path }}
           web_search: ${{ inputs.web_search }}
-          language: Thai
-          max_tokens: 128000
-          max_diff_chars: 1000000
