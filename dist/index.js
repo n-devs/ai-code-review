@@ -2364,25 +2364,54 @@ const AGENT_ORDER = ["author", "primary", "specialist", "checklist"];
 // โฟลเดอร์ built-in agents อยู่ข้าง dist (agents/ ที่ root ของ action repo)
 const BUILT_IN_AGENTS_DIR = path.join(__dirname, "..", "agents");
 const AGENTS_PATH_INPUT = (process.env.INPUT_AGENTS_PATH ?? "").trim();
+// parse ไฟล์ agent 1 ไฟล์ — 2 รูปแบบ:
+// ใหม่: <name>.agent.md มี frontmatter (name/description/tools) ตามด้วย persona markdown
+// เดิม: <name>.md บรรทัดแรก "# Label" (ยังรองรับเพื่อไม่พัง agents_path ของผู้ใช้เก่า)
+function parseAgentFile(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed)
+        return null;
+    const fm = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/.exec(trimmed);
+    if (fm) {
+        const profile = { label: "", persona: fm[2].trim() };
+        for (const line of fm[1].split("\n")) {
+            const m = /^(name|description|tools):\s*(.*)$/.exec(line.trim());
+            if (!m)
+                continue;
+            const value = m[2].trim().replace(/^"(.*)"$/, "$1");
+            if (m[1] === "name")
+                profile.label = value;
+            else if (m[1] === "description")
+                profile.description = value;
+            else if (m[1] === "tools")
+                profile.tools = value;
+        }
+        return profile;
+    }
+    const lines = trimmed.split("\n");
+    const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
+    if (heading) {
+        return { label: heading[1].trim(), persona: lines.slice(1).join("\n").trim() };
+    }
+    return { label: "", persona: trimmed };
+}
 function loadAgentFiles(dir) {
     const agents = new Map();
     let files;
     try {
-        files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".md"));
+        files = fs.readdirSync(dir).filter((f) => /\.agent\.md$/i.test(f) || /\.md$/i.test(f));
     }
     catch {
         return agents;
     }
     for (const file of files) {
         try {
-            const raw = fs.readFileSync(path.join(dir, file), "utf8").trim();
-            if (!raw)
+            const raw = fs.readFileSync(path.join(dir, file), "utf8");
+            const profile = parseAgentFile(raw);
+            if (!profile || !profile.persona)
                 continue;
-            const lines = raw.split("\n");
-            const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
-            const label = heading ? heading[1].trim() : file.replace(/\.md$/i, "");
-            const persona = heading ? lines.slice(1).join("\n").trim() : raw;
-            agents.set(file.replace(/\.md$/i, "").toLowerCase(), { label, persona });
+            const id = file.replace(/\.agent\.md$/i, "").replace(/\.md$/i, "").toLowerCase();
+            agents.set(id, { ...profile, label: profile.label || id });
         }
         catch (err) {
             console.warn(`agents: cannot read '${file}' — skipped (${err.message}).`);
@@ -2482,57 +2511,7 @@ function resolveAgents() {
     return selected;
 }
 const AGENTS = resolveAgents();
-const BUILT_IN_SKILLS = [
-    {
-        name: "security",
-        description: "OWASP-style security review of the changed code",
-        content: "- Injection (SQL/NoSQL/command/template): flag string-concatenated queries and unescaped shell calls\n" +
-            "- XSS: unescaped user input rendered in HTML/templates\n" +
-            "- Auth: missing authorization checks on new endpoints; IDOR on user-scoped resources\n" +
-            "- Secrets: hardcoded keys/tokens/passwords, secrets logged or sent to the client\n" +
-            "- Validate input at trust boundaries; avoid unsafe deserialization and SSRF via user-controlled URLs",
-    },
-    {
-        name: "testing",
-        description: "Test coverage and test quality guidance",
-        content: "- Identify behavior changed by this diff that lacks unit/integration coverage\n" +
-            "- Tests should cover the happy path, key edge cases (empty/null/boundary), and error paths\n" +
-            "- Flag tests that mock everything and assert nothing meaningful\n" +
-            "- Non-deterministic tests (time, random, network) should be controlled or faked",
-    },
-    {
-        name: "performance",
-        description: "Performance and resource usage review",
-        content: "- N+1 queries: queries or async calls inside loops\n" +
-            "- Missing indexes for new query patterns; unbounded queries without LIMIT/pagination\n" +
-            "- O(n^2) patterns and large in-memory payloads on hot paths\n" +
-            "- Cache repeated expensive work; bound concurrency",
-    },
-    {
-        name: "clean-code",
-        description: "Readability and maintainability review",
-        content: "- Names should reveal intent; flag abbreviations and misleading names\n" +
-            "- Functions should do one thing; flag long functions and deep nesting (suggest guard clauses)\n" +
-            "- DRY: duplicated logic to extract; dead code and commented-out blocks to remove\n" +
-            "- Magic numbers/strings should become named constants",
-    },
-    {
-        name: "error-handling",
-        description: "Error handling and resilience review",
-        content: "- Catch errors and handle them with meaningful messages; no silent swallowing\n" +
-            "- External calls (HTTP/DB) need timeouts; retry with backoff where appropriate\n" +
-            "- Distinguish expected failures (validation) from unexpected ones (bugs)\n" +
-            "- Clean up resources on failure paths; keep error types consistent",
-    },
-    {
-        name: "api-contract",
-        description: "API design and backward compatibility review",
-        content: "- REST conventions: resource naming, correct status codes, pagination\n" +
-            "- Breaking changes (removed/renamed fields and endpoints) must be flagged loudly\n" +
-            "- Validate request payloads; document new params/fields (e.g. OpenAPI) where applicable\n" +
-            "- Use versioning for incompatible changes",
-    },
-];
+const BUILT_IN_SKILLS_DIR = path.join(__dirname, "..", "skills");
 const SKILLS_RAW = (process.env.INPUT_SKILLS ?? process.env.SKILLS ?? "").trim().toLowerCase();
 const CUSTOM_SKILLS_RAW = (process.env.INPUT_CUSTOM_SKILLS ?? process.env.CUSTOM_SKILLS ?? "").trim();
 const SKILLS_PATH = (process.env.INPUT_SKILLS_PATH ?? process.env.SKILLS_PATH ?? "").trim();
@@ -2574,46 +2553,90 @@ function parseCustomSkills(raw) {
     }
     return defs;
 }
-// skills_path — import ไฟล์ *.md จากโฟลเดอร์ใน repo ทีละชุด (ชื่อ skill = ชื่อไฟล์,
-// ถ้าบรรทัดแรกเป็น heading # จะใช้เป็น description)
+// parse ไฟล์ skill 1 ไฟล์ — 2 รูปแบบ:
+// ใหม่: frontmatter (name/description) + body (โฟลเดอร์ <name>/SKILL.md)
+// เดิม: บรรทัดแรก "# Title" = description (ไฟล์แบน <name>.md — ยังรองรับ)
+function parseSkillFile(raw) {
+    const trimmed = raw.trim();
+    const fm = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/.exec(trimmed);
+    if (fm) {
+        const out = { content: fm[2].trim() };
+        for (const line of fm[1].split("\n")) {
+            const m = /^(name|description):\s*(.*)$/.exec(line.trim());
+            if (!m)
+                continue;
+            const value = m[2].trim().replace(/^"(.*)"$/, "$1");
+            if (m[1] === "name")
+                out.name = value;
+            else
+                out.description = value;
+        }
+        return out;
+    }
+    const lines = trimmed.split("\n");
+    const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
+    if (heading) {
+        return { description: heading[1].trim(), content: lines.slice(1).join("\n").trim() };
+    }
+    return { content: trimmed };
+}
+// โหลด skills จากโฟลเดอร์แบบ recursive (**/*.md) — อ่าน .md ทุกชั้นความลึก:
+// - <dir>/<name>/SKILL.md → id = ชื่อโฟลเดอร์แม่ (หรือ frontmatter name)
+// - <dir>/**/<name>.md    → id = ชื่อไฟล์ (หรือ frontmatter name)
 function loadSkillsFromPath(dir) {
     if (!dir)
         return [];
-    let files;
-    try {
-        files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".md"));
-    }
-    catch {
-        console.warn(`skills_path: cannot read directory '${dir}' — skipped.`);
-        return [];
-    }
     const defs = [];
-    for (const file of files) {
+    const walk = (current, depth) => {
+        if (depth > 5)
+            return; // กันโฟลเดอร์ลึกเกิน/วนซ้ำ
+        let entries;
         try {
-            const raw = fs.readFileSync(path.join(dir, file), "utf8").trim();
-            if (!raw)
-                continue;
-            const lines = raw.split("\n");
-            const heading = /^#\s+(.*)$/.exec(lines[0] ?? "");
-            const description = heading ? heading[1].trim() : "";
-            const content = heading ? lines.slice(1).join("\n").trim() : raw;
-            defs.push({ name: file.replace(/\.md$/i, "").toLowerCase(), description, content });
+            entries = fs.readdirSync(current, { withFileTypes: true });
         }
         catch (err) {
-            console.warn(`skills_path: cannot read '${file}' — skipped (${err.message}).`);
+            if (depth === 0)
+                console.warn(`skills: cannot read directory '${current}' — skipped.`);
+            return;
         }
-    }
-    if (defs.length)
-        console.log(`skills_path: imported ${defs.length} skill(s) from ${dir}`);
+        for (const entry of entries) {
+            const full = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(full, depth + 1);
+                continue;
+            }
+            if (!entry.isFile() || !/\.md$/i.test(entry.name))
+                continue;
+            try {
+                const parsed = parseSkillFile(fs.readFileSync(full, "utf8"));
+                if (!parsed.content)
+                    continue;
+                const fallbackId = /^skill\.md$/i.test(entry.name)
+                    ? path.basename(current) // SKILL.md → ใช้ชื่อโฟลเดอร์แม่
+                    : entry.name.replace(/\.md$/i, "");
+                defs.push({
+                    name: (parsed.name || fallbackId).trim().toLowerCase(),
+                    description: parsed.description ?? "",
+                    content: parsed.content,
+                });
+            }
+            catch (err) {
+                console.warn(`skills: cannot read '${full}' — skipped (${err.message}).`);
+            }
+        }
+    };
+    walk(dir, 0);
     return defs;
 }
-// registry: built-in + custom (JSON) + imported (folder) — ชื่อซ้ำ override ตัวเดิม
+// registry: built-in (skills/ ข้าง dist) → skills_path ของ repo ผู้ใช้ → custom (JSON) — ชื่อซ้ำ override ตัวเดิม
 const SKILL_REGISTRY = new Map();
-for (const skill of BUILT_IN_SKILLS)
+for (const skill of loadSkillsFromPath(BUILT_IN_SKILLS_DIR))
+    SKILL_REGISTRY.set(skill.name, skill);
+if (!SKILL_REGISTRY.size)
+    console.warn(`No built-in skills found in ${BUILT_IN_SKILLS_DIR}.`);
+for (const skill of loadSkillsFromPath(SKILLS_PATH))
     SKILL_REGISTRY.set(skill.name, skill);
 for (const skill of parseCustomSkills(CUSTOM_SKILLS_RAW))
-    SKILL_REGISTRY.set(skill.name, skill);
-for (const skill of loadSkillsFromPath(SKILLS_PATH))
     SKILL_REGISTRY.set(skill.name, skill);
 // เลือก skill ตามค่า input: "", "auto", "all" หรือรายชื่อคั่น comma
 function resolveSkillNames(files) {

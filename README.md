@@ -180,7 +180,17 @@ Both file types use a **fixed schema** (stable headings — content is free-form
 
 Skills are knowledge modules injected into **every agent's** system prompt when enabled — each one focuses the review on a specific area.
 
-**Built-in skills:**
+**Built-in skills** live in the action's [`skills/`](skills/) folder — one folder per skill:
+
+```
+skills/
+├── security/SKILL.md
+├── testing/SKILL.md
+├── performance/SKILL.md
+├── clean-code/SKILL.md
+├── error-handling/SKILL.md
+└── api-contract/SKILL.md
+```
 
 | Skill | Focus |
 |---|---|
@@ -204,11 +214,35 @@ Skills are knowledge modules injected into **every agent's** system prompt when 
 custom_skills: |
   [{"name": "k8s", "description": "Kubernetes review", "content": "- Check resource limits...\n- Check liveness/readiness probes"}]
 
-# 2) Import a folder of markdown files from the repo
-skills_path: .github/ai-skills
+# 2) Import a skills folder from your repo
+skills_path: .github/skills
 ```
 
-Each `*.md` file in the folder becomes a skill named after the file (an optional first-line `# Title` becomes its description). Later definitions override earlier ones with the same name.
+Folder format — one folder per skill, each with a `SKILL.md` using frontmatter:
+
+```
+.github/skills/
+└── review-security/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: review-security
+description: "Review security-sensitive changes... Use for code review involving credentials or network changes."
+---
+
+# Review security-sensitive changes
+
+1. Identify trust boundaries and trace untrusted input...
+```
+
+The folder is scanned **recursively** — every `*.md` file at any depth becomes a skill:
+
+- `<name>/SKILL.md` → skill id = folder name (or frontmatter `name`)
+- any other `<name>.md` at any depth (`**/*.md`) → skill id = file name (or frontmatter `name`)
+
+The frontmatter `name` overrides the default id; `description` is shown with the skill in the prompt. Later definitions override earlier ones with the same name.
 
 ## Multi-Agent Review
 
@@ -218,14 +252,30 @@ Agent definitions live in markdown files — one per agent — in the action's [
 
 ```
 agents/
-├── author.md      # 🧑‍💻 Author (Self-Review)
-├── primary.md     # 🔍 Primary Reviewer
-├── specialist.md  # 🛡️ Specialist Reviewer
-├── checklist.md   # 📋 Code Review Checklist
-└── combined.md    # 🤖 default single agent (all four roles)
+├── author.agent.md      # 🧑‍💻 Author (Self-Review)
+├── primary.agent.md     # 🔍 Primary Reviewer
+├── specialist.agent.md  # 🛡️ Specialist Reviewer
+├── checklist.agent.md   # 📋 Code Review Checklist
+└── combined.agent.md    # 🤖 default single agent (all four roles)
 ```
 
-Each file's first line `# Label` is the display name; the rest is the agent persona. To customize, fork the action and edit these files — or keep your own folder in your repo and point `agents_path` at it (e.g. `agents_path: .github/agents`). Same file name overrides a built-in; a new file name adds a new agent you can select in `agents`.
+Each `<name>.agent.md` file uses **frontmatter + markdown body** (the file name is the agent id you reference in `agents`):
+
+```markdown
+---
+name: "🔍 Primary Reviewer"
+description: "Peer review of business logic, edge cases, error handling, and tests."
+tools: [read, search]
+---
+
+You are the Primary Reviewer, a peer developer on the same team. ...
+```
+
+- `name` — display label shown in the report
+- `description` / `tools` — declarative metadata for humans
+- body — the agent persona
+
+To customize, fork the action and edit these files — or keep your own folder in your repo and point `agents_path` at it (e.g. `agents_path: .github/agents`). Same file name overrides a built-in; a new file name adds a new agent you can select in `agents`. Legacy `<name>.md` files with a first-line `# Label` are still accepted.
 
 Set `agents: all` (or a comma-separated subset) to run the agents **in parallel** — each posts its own section (or prefixed inline comments in `files_changed` mode). Use this when you want deeper, role-focused passes and don't mind the extra AI calls.
 

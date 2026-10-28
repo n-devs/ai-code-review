@@ -71,7 +71,7 @@ inputs:
     required: false
     default: ""
   agents_path:
-    description: "Load/override agents from a folder of <agent-name>.md files in your repo (e.g. .github/agents). First line '# Label' is the display label; the rest is the persona. Same name overrides a built-in; new names add agents."
+    description: "Load/override agents from a folder of <agent-name>.agent.md files in your repo (e.g. .github/agents). Format: YAML-ish frontmatter (name, description, tools) followed by the persona markdown — 'name' is the display label. Legacy <name>.md files with a first-line '# Label' still work. Same name overrides a built-in; new names add agents."
     required: false
     default: ""
   custom_agents:
@@ -87,7 +87,7 @@ inputs:
     required: false
     default: ""
   skills_path:
-    description: "Import skills from a folder of markdown files in the repo (e.g. .github/ai-skills). Each *.md file becomes a skill named after the file; an optional first-line '# Title' is its description."
+    description: "Import skills from a folder in your repo (e.g. .github/skills). Scanned recursively for *.md files: <name>/SKILL.md uses the folder name as the skill id; any other <name>.md (any depth) uses the file name. Frontmatter (name, description) overrides both."
     required: false
     default: ""
   memory:

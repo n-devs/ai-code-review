@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g. v4.1.0). Release notes must exist at docs/release/v4.1.0.md or the deploy is aborted."
+        description: "Version to release (e.g. v5.0.0). Release notes must exist at docs/release/v5.0.0.md or the deploy is aborted."
         required: true
         type: string
-        default: "v4.1.0"
+        default: "v5.0.0"
 
 permissions:
   contents: write
