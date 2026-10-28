@@ -1,24 +1,178 @@
 name: Test AI Code Review Action
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       pr_number:
         description: "Pull request number to review"
         required: true
         type: string
+      provider:
+        description: "AI provider"
+        required: false
+        type: choice
+        default: "github-azure-models"
+        options:
+          - github-azure-models
+          - github-models
+          - copilot
+          - openai
+          - anthropic
+          - openrouter
+          - ollama
+          - xai
+          - zai
+          - qwencloud
+          - qwencloud-plan
+          - google
+          - azure
+          - aws
+          - custom
+      model:
+        description: "AI model name (e.g. gpt-4o, qwen-plus, claude-3-5-sonnet-20241022)"
+        required: false
+        default: "gpt-4o"
+        type: string
+      api_type:
+        description: "API type (auto = let provider decide)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - chat
+          - messages
+          - responses
+          - text
+      language:
+        description: "Review language (e.g. Thai, English)"
+        required: false
+        default: "Thai"
+        type: string
+      max_tokens:
+        description: "Max output tokens for the AI response"
+        required: false
+        default: 128000
+        type: number
+      max_diff_chars:
+        description: "Max diff characters sent to the AI"
+        required: false
+        default: 1000000
+        type: number
+      api_key:
+        description: "AI API key (leave empty to use GITHUB_TOKEN)"
+        required: false
+        default: ""
+        type: string
+      files_changed:
+        description: "Post inline review comments on changed files (Files changed tab)"
+        required: false
+        default: false
+        type: boolean
+      skills_path:
+        description: "Folder of *.md skill files to import (e.g. .github/ai-skills)"
+        required: false
+        default: ""
+        type: string
+      max_comments:
+        description: "Max inline comments (0 = unlimited)"
+        required: false
+        default: 0
+        type: number
+      username:
+        description: "Review only changes by this GitHub username ('all' = everyone, empty = you)"
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "Model mode (thinking enables reasoning mode)"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - thinking
+      effort:
+        description: "Reasoning effort (none = don't send)"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - low
+          - medium
+          - high
+          - max
+      agents:
+        description: "Agents: empty = one combined agent; all or comma-separated (author,primary,specialist,checklist + custom) to split"
+        required: false
+        default: ""
+        type: string
+      agents_path:
+        description: "Folder of <agent-name>.md files to load/override agents (e.g. .github/agents)"
+        required: false
+        default: ""
+        type: string
+      custom_agents:
+        description: 'Custom agents as JSON array, e.g. [{"name":"db","label":"🗄️ DBA","persona":"You are a DBA..."}] — same name as built-in = override'
+        required: false
+        default: ""
+        type: string
+      skills:
+        description: "Skills for agents: auto, all, comma-separated names, or empty to disable"
+        required: false
+        default: "auto"
+        type: string
+      custom_skills:
+        description: 'Custom skills as JSON array [{"name":"...","description":"...","content":"..."}]'
+        required: false
+        default: ""
+        type: string
+      web_search:
+        description: "Let the AI search the web during review (model must support tools)"
+        required: false
+        default: false
+        type: boolean
+      memory:
+        description: "Review memory: load dated context files + previous feedback, save new memory after run"
+        required: false
+        default: true
+        type: boolean
+      context_path:
+        description: "Folder for memory files (<date>-context.md)"
+        required: false
+        default: ".github/ai-review"
+        type: string
+      memory_branch:
+        description: "Branch to save memory to (empty = default branch; must already exist)"
+        required: false
+        default: ""
+        type: string
+      memory_files:
+        description: "Memory to load: N latest (3), dates (2026-10-25,2026-10-28), or range (2026-10-20..2026-10-28)"
+        required: false
+        default: "3"
+        type: string
 
 permissions:
   pull-requests: write
-  contents: read
+  contents: write
   models: read
 
 jobs:
   ai-code-review:
     runs-on: ubuntu-latest
     steps:
+      # อ่าน key จาก event payload แทน env/expression เพราะ GitHub พิมพ์ค่า env ของ step
+      # ลง log ก่อนที่ add-mask จะทำงาน
+      - name: Mask API key in logs
+        if: ${{ inputs.api_key != '' }}
+        run: |
+          key=$(jq -r '.inputs.api_key // empty' "$GITHUB_EVENT_PATH")
+          if [ -n "$key" ]; then
+            echo "::add-mask::$key"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -30,8 +184,27 @@ jobs:
         with:
           gh_pat: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
-          pr_number: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
-          api_key: ${{ secrets.GITHUB_TOKEN }}
-          language: Thai
-          max_tokens: 2048
-          max_diff_chars: 10000
+          pr_number: ${{ inputs.pr_number }}
+          provider: ${{ inputs.provider }}
+          model: ${{ inputs.model }}
+          api_type: ${{ inputs.api_type != 'auto' && inputs.api_type || '' }}
+          language: ${{ inputs.language || 'Thai' }}
+          max_tokens: ${{ inputs.max_tokens || '128000' }}
+          max_diff_chars: ${{ inputs.max_diff_chars || '1000000' }}
+          api_key: ${{ inputs.api_key || secrets.GITHUB_TOKEN }}
+          files_changed: ${{ inputs.files_changed }}
+          max_comments: ${{ inputs.max_comments || '0' }}
+          username: ${{ inputs.username || github.actor }}
+          mode: ${{ inputs.mode || 'normal' }}
+          effort: ${{ inputs.effort != 'none' && inputs.effort || '' }}
+          agents: ${{ inputs.agents }}
+          agents_path: ${{ inputs.agents_path }}
+          custom_agents: ${{ inputs.custom_agents }}
+          skills: ${{ inputs.skills }}
+          custom_skills: ${{ inputs.custom_skills }}
+          skills_path: ${{ inputs.skills_path }}
+          web_search: ${{ inputs.web_search }}
+          memory: ${{ inputs.memory }}
+          context_path: ${{ inputs.context_path }}
+          memory_branch: ${{ inputs.memory_branch }}
+          memory_files: ${{ inputs.memory_files }}

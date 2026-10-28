@@ -50,6 +50,16 @@ describe("PROVIDER_BASES", () => {
   it("xai base URL", () => {
     expect(PROVIDER_BASES.xai).toBe("https://api.x.ai/v1");
   });
+  it("qwencloud base URL", () => {
+    expect(PROVIDER_BASES.qwencloud).toBe(
+      "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1"
+    );
+  });
+  it("qwencloud-plan base URL", () => {
+    expect(PROVIDER_BASES["qwencloud-plan"]).toBe(
+      "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
+    );
+  });
   it("google base URL", () => {
     expect(PROVIDER_BASES.google).toBe(
       "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -126,6 +136,24 @@ describe("resolveApiUrl", () => {
   it("constructs GitHub Models chat URL", () => {
     expect(resolveApiUrl("github-models", "chat")).toBe(
       "https://models.github.ai/inference/chat/completions"
+    );
+  });
+  it("constructs Qwen Cloud chat URL (OpenAI-compatible)", () => {
+    expect(resolveApiUrl("qwencloud", "chat")).toBe(
+      "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1/chat/completions"
+    );
+  });
+  it("constructs Qwen Cloud messages URL (Anthropic-compatible)", () => {
+    expect(resolveApiUrl("qwencloud", "messages")).toBe(
+      "https://ap-southeast-1.maas.qwencloudapi.com/apps/anthropic/messages"
+    );
+  });
+  it("constructs qwencloud-plan chat and messages URLs", () => {
+    expect(resolveApiUrl("qwencloud-plan", "chat")).toBe(
+      "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1/chat/completions"
+    );
+    expect(resolveApiUrl("qwencloud-plan", "messages")).toBe(
+      "https://token-plan.maas.qwencloudapi.com/apps/anthropic/messages"
     );
   });
   it("uses override URL when provided, ignoring provider+type", () => {

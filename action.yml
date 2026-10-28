@@ -24,7 +24,7 @@ inputs:
     required: false
     default: "gpt-4o"
   provider:
-    description: "AI provider shorthand: copilot, github-models, openai, anthropic, openrouter, ollama, xai, zai, google, azure, aws, custom — sets api_url and api_type defaults automatically (azure/aws require api_url). Use github-models to authenticate with GITHUB_TOKEN without needing a personal PAT."
+    description: "AI provider shorthand: copilot, github-models, openai, anthropic, openrouter, ollama, xai, zai, qwencloud, qwencloud-plan, google, azure, aws, custom — sets api_url and api_type defaults automatically (azure/aws require api_url). Use github-models to authenticate with GITHUB_TOKEN without needing a personal PAT."
     required: false
     default: "github-azure-models"
   api_url:
@@ -46,6 +46,70 @@ inputs:
     description: "Language for the code review response (e.g. English, Thai, Japanese)"
     required: false
     default: "English"
+  files_changed:
+    description: "Set to 'true' to have the AI review each changed file and post inline review comments on the diff (Files changed tab) instead of one combined PR comment"
+    required: false
+    default: "false"
+  max_comments:
+    description: "Max inline review comments (files_changed mode). 0 or empty (default) = no limit — posts every comment. When set to a number > 0, the quota is distributed round-robin across agents."
+    required: false
+    default: ""
+  username:
+    description: "GitHub username whose changes to review — only files changed in commits authored by this user are reviewed, and the user is @mentioned in the review comment. Use 'all' to review everyone — each author is then @mentioned with their files. Defaults to the user who triggered the workflow run (GITHUB_ACTOR)."
+    required: false
+    default: ""
+  mode:
+    description: "Model reasoning mode: 'thinking' enables thinking/reasoning mode for models that support it (enable_thinking for OpenAI-compatible chat, thinking block for Anthropic messages). 'normal' (default) sends no extra params."
+    required: false
+    default: "normal"
+  effort:
+    description: "Reasoning effort for thinking models: low, medium, high, or max — adds reasoning_effort (chat), reasoning.effort (responses), or maps to the thinking budget (messages). Empty or 'none' (default) sends nothing."
+    required: false
+    default: ""
+  agents:
+    description: "Multi-agent review: 'all' or comma-separated list — built-ins: author, primary, specialist, checklist; plus any names from custom_agents/agents_path. Empty (default) = single combined agent."
+    required: false
+    default: ""
+  agents_path:
+    description: "Load/override agents from a folder of <agent-name>.agent.md files in your repo (e.g. .github/agents). Format: YAML-ish frontmatter (name, description, tools) followed by the persona markdown — 'name' is the display label. Legacy <name>.md files with a first-line '# Label' still work. Same name overrides a built-in; new names add agents."
+    required: false
+    default: ""
+  custom_agents:
+    description: "Customize or add agents as a JSON array: [{\"name\": \"primary\", \"persona\": \"...\"}] overrides a built-in agent (author/primary/specialist/checklist); a new name adds a new agent. Optional 'label' is shown in the report. Refer to custom names in 'agents', or 'all' to run everything."
+    required: false
+    default: ""
+  skills:
+    description: "Skills injected into every agent's prompt: comma-separated skill names, 'all', 'auto' (picked by diff content), or empty to disable. Built-ins: security, testing, performance, clean-code, error-handling, api-contract — plus any custom_skills/skills_path entries."
+    required: false
+    default: ""
+  custom_skills:
+    description: "Add your own skills as a JSON array: [{\"name\": \"k8s\", \"description\": \"...\", \"content\": \"- check ...\"}]. 'name' and 'content' required."
+    required: false
+    default: ""
+  skills_path:
+    description: "Import skills from a folder in your repo (e.g. .github/skills). Scanned recursively for *.md files: <name>/SKILL.md uses the folder name as the skill id; any other <name>.md (any depth) uses the file name. Frontmatter (name, description) overrides both."
+    required: false
+    default: ""
+  memory:
+    description: "Set to 'true' to enable review memory: loads context.md + the latest <date>-context.md files from context_path and the bot's previous comments on the PR (no repeat reports), then after the run saves a new AI-generated memory file <today>-context.md back to the repo (requires contents: write permission)."
+    required: false
+    default: "false"
+  context_path:
+    description: "Folder (in the repo) holding memory files: context.md (stable base) and <date>-context.md (daily memory)."
+    required: false
+    default: ".github/ai-review"
+  memory_branch:
+    description: "Branch to save memory files to. Empty (default) = the repository's default branch. The branch must already exist; otherwise saving is skipped with a warning."
+    required: false
+    default: ""
+  memory_files:
+    description: "Which dated memory files to load: a number = latest N files (e.g. 3), specific dates comma-separated (e.g. 2026-10-25,2026-10-28), or a date range (e.g. 2026-10-20..2026-10-28)."
+    required: false
+    default: "3"
+  web_search:
+    description: "Set to 'true' to let the AI search the web during review. Uses native web search for Anthropic messages / OpenAI responses, and a web_search function-calling loop (DuckDuckGo, no key needed) for chat/GitHub Models. Requires a model/provider that supports tools."
+    required: false
+    default: "false"
 
 runs:
   using: "node24"

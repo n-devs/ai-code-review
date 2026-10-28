@@ -9,6 +9,8 @@ export type Provider =
   | "ollama"
   | "xai"
   | "zai"
+  | "qwencloud"
+  | "qwencloud-plan"
   | "google"
   | "azure"
   | "aws"
@@ -31,8 +33,22 @@ export const PROVIDER_BASES: Partial<Record<Provider, string>> = {
   ollama: "http://localhost:11434/v1",
   xai: "https://api.x.ai/v1",
   zai: "https://api.z.ai/api/coding/paas/v4",
+  // Qwen Cloud — OpenAI-compatible endpoint (base สำหรับ chat/responses/text)
+  qwencloud: "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+  "qwencloud-plan": "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
   google: "https://generativelanguage.googleapis.com/v1beta/openai",
   // azure/aws/custom: must provide api_url
+};
+
+// Base URL แยกตาม api_type สำหรับ provider ที่มี endpoint ต่างกันในแต่ละโปรโตคอล
+// (เช่น Qwen Cloud: OpenAI-compatible อยู่ที่ /compatible-mode/v1 แต่ Anthropic-compatible อยู่ที่ /apps/anthropic)
+export const PROVIDER_TYPE_BASES: Partial<Record<Provider, Partial<Record<ApiType, string>>>> = {
+  qwencloud: {
+    messages: "https://ap-southeast-1.maas.qwencloudapi.com/apps/anthropic",
+  },
+  "qwencloud-plan": {
+    messages: "https://token-plan.maas.qwencloudapi.com/apps/anthropic",
+  },
 };
 
 export const PROVIDER_DEFAULT_TYPE: Partial<Record<Provider, ApiType>> = {
@@ -54,10 +70,11 @@ export function resolveApiUrl(
   override?: string
 ): string {
   if (override) return override;
-  const base = ((provider && PROVIDER_BASES[provider]) ?? "https://api.githubcopilot.com").replace(
-    /\/$/,
-    ""
-  );
+  const base = (
+    (provider && PROVIDER_TYPE_BASES[provider]?.[apiType]) ??
+    (provider && PROVIDER_BASES[provider]) ??
+    "https://api.githubcopilot.com"
+  ).replace(/\/$/, "");
   return base + API_TYPE_PATHS[apiType];
 }
 

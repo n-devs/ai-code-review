@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build action
+        run: npm run build
+
+      - name: Check committed dist freshness
+        run: |
+          # ncc output ต่างกันเล็กน้อยข้าม platform (tslib bundling) จึงเช็คเป็น warning ไม่ fail
+          if git diff --exit-code -- dist/; then
+            echo "dist/ matches the fresh build"
+          else
+            echo "::warning::dist/ differs from a fresh build on this platform — if you changed src/, remember to rebuild (npm run build) and commit dist/"
+          fi
